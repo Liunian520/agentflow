@@ -1,0 +1,9 @@
+name = "agentflow"
+compatibility_date = "2025-07-01"
+
+[env.production]
+# 生产环境变量在 Cloudflare Dashboard 中设置
+# VITE_API_BASE = "https://your-backend-server.com/api"
+
+# Cloudflare Pages 配置
+[[env.production.vars]]

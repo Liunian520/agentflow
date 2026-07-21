@@ -1,0 +1,134 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  overscroll-behavior: none;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* 移动端滚动优化 */
+.overflow-y-auto,
+.overflow-auto {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+
+/* 防止移动端整页橡皮筋效果 */
+html,
+body {
+  overscroll-behavior-y: none;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9ca3af;
+}
+
+/* React Flow custom styles */
+.react-flow__node {
+  padding: 0;
+  border-radius: 8px;
+  font-size: 14px;
+  border: 1px solid #e5e7eb;
+  background: white;
+  box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.react-flow__node:hover {
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+.react-flow__node.selected {
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 3px #ede9fe;
+}
+
+.react-flow__handle {
+  width: 8px;
+  height: 8px;
+  background: white;
+  border: 2px solid #d1d5db;
+}
+
+.react-flow__handle:hover {
+  border-color: #8b5cf6;
+  background: #8b5cf6;
+}
+
+.react-flow__edge-path {
+  stroke: #d1d5db;
+  stroke-width: 2;
+}
+
+.react-flow__edge:hover .react-flow__edge-path {
+  stroke: #8b5cf6;
+}
+
+.react-flow__attribution {
+  display: none;
+}
+
+.react-flow__controls {
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.react-flow__controls button {
+  background: white;
+  border-bottom: 1px solid #e5e7eb;
+  color: #6b7280;
+}
+
+.react-flow__controls button:hover {
+  background: #f3f4f6;
+  color: #111827;
+}
+
+.react-flow__minimap {
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

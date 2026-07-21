@@ -1,0 +1,45 @@
+{
+  "name": "agentflow",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "server": "tsx server/index.ts",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=agentflow",
+    "deploy:staging": "npm run build && wrangler pages deploy dist --project-name=agentflow --branch=staging"
+  },
+  "dependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/ssh2": "^1.15.5",
+    "clsx": "^2.1.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "lucide-react": "^1.25.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-router-dom": "^7.18.1",
+    "reactflow": "^11.11.4",
+    "ssh2": "^1.17.0",
+    "tailwind-merge": "^3.6.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "autoprefixer": "^10.5.4",
+    "oxlint": "^1.71.0",
+    "postcss": "^8.5.20",
+    "tailwindcss": "^3.4.1",
+    "tsx": "^4.23.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "wrangler": "^4.112.0"
+  }
+}

@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: agentflow-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run server
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVER_PORT
+        value: 10000
