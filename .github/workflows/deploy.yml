@@ -1,16 +1,9 @@
-# =============================================================================
 # Deploy to Cloudflare Pages
-# -----------------------------------------------------------------------------
-# 触发：push 到 main 或 手动 workflow_dispatch
-#
-# ⚠️ 必填的 GitHub Secrets（Settings → Secrets and variables → Actions → Secrets）：
-#   - CLOUDFLARE_API_TOKEN : 具有 Pages:Edit 权限的 Cloudflare API Token
-#   - CLOUDFLARE_ACCOUNT_ID: Cloudflare 账户 ID
-#
-# ⚠️ 必填的 GitHub Variables（Settings → Secrets and variables → Actions → Variables）：
-#   - VITE_API_BASE : 前端要调用的后端地址，例如 https://agentflow-server.onrender.com/api
-#     缺失会导致构建出的前端不知道后端在哪（API 全部失败）。
-# =============================================================================
+# Required GitHub Secrets:
+#   CLOUDFLARE_API_TOKEN  - Cloudflare API Token with Pages:Edit
+#   CLOUDFLARE_ACCOUNT_ID - Cloudflare Account ID
+# Required GitHub Variables:
+#   VITE_API_BASE - backend API URL, e.g. https://agentflow-server.onrender.com/api
 name: Deploy to Cloudflare Pages
 
 on:
@@ -36,9 +29,6 @@ jobs:
         run: npm run build
         env:
           VITE_API_BASE: ${{ vars.VITE_API_BASE }}
-
-      - name: Debug build env
-        run: echo "VITE_API_BASE is set: ${{ vars.VITE_API_BASE != '' }}"
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
