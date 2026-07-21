@@ -1,9 +1,10 @@
 name = "agentflow"
-compatibility_date = "2025-07-01"
+compatibility_date = "2026-07-21"
+
+pages_build_output_dir = "dist"
+build_command = "npm run build"
+production_branch = "main"
+
+[vars]
 
 [env.production]
-# 生产环境变量在 Cloudflare Dashboard 中设置
-# VITE_API_BASE = "https://your-backend-server.com/api"
-
-# Cloudflare Pages 配置
-[[env.production.vars]]
