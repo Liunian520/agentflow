@@ -412,7 +412,7 @@ export interface Template {
 // ===== 对话式编程扩展类型 =====
 
 // Agent 工作模式（对标 Kilo Code / Cline）
-export type AgentMode = 'plan' | 'code' | 'debug' | 'orchestrator';
+export type AgentMode = 'plan' | 'code' | 'debug' | 'orchestrator' | 'ask';
 
 export interface ModeConfig {
   id: AgentMode;

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
   Trash2, ChevronLeft, ChevronRight, Lightbulb,
+  Paperclip, FileText, X, Image as ImageIcon,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
@@ -27,6 +28,17 @@ import { ApprovalPrompt, needsApproval } from '../components/chat/ApprovalPrompt
 import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
 import { chatLLMStreamEnhanced, getAvailableChannelFromStore } from '../api/llmApi';
 import { ProjectDirPanel, type FileNode, type FileChange } from '../components/chat/ProjectDirPanel';
+
+/** 用户上传的文件，作为单次对话的上下文 */
+interface UploadedFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  kind: 'text' | 'image' | 'other';
+  content?: string;   // 文本/代码文件内容
+  preview?: string;   // 图片预览 dataURL
+}
 
 // 预置快捷建议
 const quickSuggestions = [
@@ -133,7 +145,7 @@ export function ChatWorkspacePage() {
         {
           id: 'msg-welcome',
           role: 'assistant',
-          content: `你好！我是 AgentFlow 对话助手 🤖\n\n支持 **四种工作模式**：\n\n- **规划模式** — 只分析不执行，想清楚再动手\n- **编码模式** — 执行需确认，安全可靠\n- **调试模式** — 自动诊断修复问题\n- **编排模式** — 协调多 Agent 并行执行\n\n输入 \`/help\` 查看所有斜杠命令，或试试下面的快捷建议 👇`,
+          content: `你好！我是 AgentFlow 对话助手 🤖\n\n支持 **五种工作模式**（顶栏可一键切换）：\n\n- **规划** — 只分析不执行，想清楚再动手\n- **编码** — 执行需确认，安全可靠\n- **调试** — 自动诊断修复问题\n- **编排** — 协调多 Agent 并行执行\n- **问答** — 纯问答，不执行任何操作\n\n💡 你还可以 **上传文件/代码** 作为对话上下文，或 **选择项目目录** 让 AI 直接读写你的文件。\n\n输入 \`/help\` 查看所有斜杠命令，或试试下面的快捷建议 👇`,
           timestamp: new Date().toISOString(),
           messageType: 'text',
         },
@@ -175,6 +187,10 @@ export function ChatWorkspacePage() {
   const [dirError, setDirError] = useState<string | null>(null);
   const [pendingChanges, setPendingChanges] = useState<FileChange[]>([]);
   const streamContentRef = useRef('');
+
+  // ===== 上传文件（作为对话上下文） =====
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   // 用 ref 持有最新的 handleLLMStream，避免 processUserInput 因声明顺序/依赖问题拿到过期闭包
   const handleLLMStreamRef = useRef<((text: string, intent: ParsedIntent, userMsg: ChatMessage) => void) | null>(null);
 
@@ -299,6 +315,59 @@ export function ChatWorkspacePage() {
 
   const clearChanges = () => setPendingChanges([]);
 
+  // 上传文件：文本/代码读取内容，图片记录预览，其余仅记元数据
+  const TEXT_EXT = /\.(ts|tsx|js|jsx|mjs|cjs|json|md|markdown|txt|py|php|html?|css|scss|sass|less|yml|yaml|env|toml|ini|sh|bash|sql|go|java|kt|rb|rs|vue|svelte|xml|csv|log|lock|gitignore|dockerfile)$/i;
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (e.target) e.target.value = ''; // 允许重复选择同一文件
+    files.forEach((file) => {
+      const id = generateId();
+      const isText = file.type.startsWith('text/') || TEXT_EXT.test(file.name);
+      if (isText) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          setUploadedFiles((prev) => [
+            ...prev,
+            { id, name: file.name, size: file.size, type: file.type || 'text/plain', kind: 'text', content: String(reader.result || '') },
+          ]);
+        };
+        reader.readAsText(file);
+      } else if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          setUploadedFiles((prev) => [
+            ...prev,
+            { id, name: file.name, size: file.size, type: file.type, kind: 'image', preview: String(reader.result || '') },
+          ]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        setUploadedFiles((prev) => [
+          ...prev,
+          { id, name: file.name, size: file.size, type: file.type || 'application/octet-stream', kind: 'other' },
+        ]);
+      }
+    });
+  };
+
+  const removeUploadedFile = (id: string) =>
+    setUploadedFiles((prev) => prev.filter((f) => f.id !== id));
+
+  // 把上传文件拼成 system 上下文片段
+  const readUploadedContext = (): string | null => {
+    if (uploadedFiles.length === 0) return null;
+    const parts = uploadedFiles.map((f) => {
+      if (f.kind === 'text' && f.content != null) {
+        const body = f.content.length > 20000 ? f.content.slice(0, 20000) + '\n…(已截断)' : f.content;
+        return `【上传文件：${f.name}】\n\`\`\`\n${body}\n\`\`\``;
+      }
+      if (f.kind === 'image') return `【上传图片：${f.name}，${(f.size / 1024).toFixed(1)}KB】(如模型支持视觉输入可参考)`;
+      return `【上传文件：${f.name}，${(f.size / 1024).toFixed(1)}KB，类型 ${f.type}】`;
+    });
+    return parts.join('\n\n');
+  };
+
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const activeMessages = activeSession?.messages || [];
 
@@ -406,7 +475,13 @@ export function ChatWorkspacePage() {
     const taskSteps = generateTaskSteps(intent.action, intent.params);
     setActiveTaskSteps(taskSteps);
 
-    // 5. Plan 模式：不执行，直接返回规划方案
+    // 5. Ask 模式：纯问答，直接走 LLM 对话，不规划、不执行
+    if (activeMode === 'ask') {
+      handleLLMStreamRef.current?.(text.trim(), intent, userMsg);
+      return;
+    }
+
+    // 6. Plan 模式：不执行，直接返回规划方案
     if (activeMode === 'plan') {
       setTimeout(() => {
         const responseText = generateResponse(intent, { success: true, type: 'plan' }, activeMode);
@@ -430,7 +505,7 @@ export function ChatWorkspacePage() {
       return;
     }
 
-    // 6. 检查是否需要操作确认
+    // 7. 检查是否需要操作确认
     const approval = needsApproval(intent.action, activeMode);
     if (approval) {
       approval.details = {
@@ -448,13 +523,13 @@ export function ChatWorkspacePage() {
       return;
     }
 
-    // 7. 无需确认：判断是否走 LLM 流式对话（纯对话/低置信度）
+    // 8. 无需确认：判断是否走 LLM 流式对话（纯对话/低置信度）
     if (intent.action === 'general_chat' || intent.confidence < 0.5) {
       handleLLMStreamRef.current?.(text.trim(), intent, userMsg);
       return;
     }
 
-    // 8. 操作类意图：直接执行
+    // 9. 操作类意图：直接执行
     executeAndRespond(intent, userMsg, taskSteps);
   }, [activeMessages, activeSessionId, activeMode, isProcessing]);
 
@@ -822,6 +897,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 - code 模式：需确认后执行
 - debug 模式：侧重诊断和修复
 - orchestrator 模式：协调多任务并行
+- ask 模式：纯问答，不执行、不规划任何操作，只回答用户问题
 
 当前系统信息：
 - Agent 数量: ${useStore.getState().agents.length}
@@ -830,11 +906,21 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 
 请根据用户的问题给出专业、简洁的回答。如需创建/修改对象，建议用户使用斜杠命令或更明确的指令。`;
 
-    // 注入本机项目目录上下文（A 路线）
+    // 注入本机项目目录上下文（A 路线）+ 上传文件上下文
     const projectContext = await readSelectedContext();
-    const contextMsg = projectContext
-      ? `【当前项目目录：${projectDir?.name}】以下是用户选中的项目文件，你可以阅读它们来理解项目结构。\n当用户需要新增或修改文件时，请用如下格式输出完整文件内容（语言名可选，冒号后是相对路径），用户确认后会自动写回对应文件：\n\`\`\`语言名:相对路径\n...完整文件内容...\n\`\`\`\n\n项目文件内容：\n${projectContext}`
-      : null;
+    const uploadedContext = readUploadedContext();
+    const contextParts: string[] = [];
+    if (projectContext) {
+      contextParts.push(
+        `【当前项目目录：${projectDir?.name}】以下是用户选中的项目文件，你可以阅读它们来理解项目结构。\n当用户需要新增或修改文件时，请用如下格式输出完整文件内容（语言名可选，冒号后是相对路径），用户确认后会自动写回对应文件：\n\`\`\`语言名:相对路径\n...完整文件内容...\n\`\`\`\n\n项目文件内容：\n${projectContext}`,
+      );
+    }
+    if (uploadedContext) {
+      contextParts.push(
+        `【用户上传的文件】以下文件由用户上传，作为本次对话的上下文参考（非项目目录文件，无需写回）：\n${uploadedContext}`,
+      );
+    }
+    const contextMsg = contextParts.length > 0 ? contextParts.join('\n\n') : null;
 
     // 工具调用日志（在流式过程中累计，最终回复前展示）
     const toolLog = { text: '' };
@@ -856,7 +942,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
           })),
           { role: 'user' as const, content: text },
         ]) as Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }>,
-        temperature: activeMode === 'debug' ? 0.3 : 0.7,
+        temperature: activeMode === 'debug' ? 0.3 : activeMode === 'ask' ? 0.5 : 0.7,
         maxTokens: 2048,
       },
       {
@@ -934,7 +1020,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     );
 
     streamAbortRef.current = abortController;
-  }, [activeMessages, activeSessionId, activeMode, projectDir, selectedFiles]);
+  }, [activeMessages, activeSessionId, activeMode, projectDir, selectedFiles, uploadedFiles]);
 
   handleLLMStreamRef.current = handleLLMStream;
 
@@ -1288,6 +1374,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
               activeMode === 'plan' ? 'bg-amber-50 text-amber-600' :
               activeMode === 'code' ? 'bg-violet-50 text-violet-600' :
               activeMode === 'debug' ? 'bg-red-50 text-red-600' :
+              activeMode === 'ask' ? 'bg-emerald-50 text-emerald-600' :
               'bg-blue-50 text-blue-600'
             )}>
               {modeConfig.icon} {modeConfig.label}
@@ -1437,7 +1524,50 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
               />
             )}
 
+            {/* 已上传文件 chips */}
+            {uploadedFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {uploadedFiles.map((f) => (
+                  <div
+                    key={f.id}
+                    className="flex items-center gap-1.5 pl-2 pr-1 py-1 rounded-lg bg-bg-secondary border border-border text-xs text-text-secondary max-w-[220px]"
+                  >
+                    {f.kind === 'image' ? <ImageIcon className="w-3.5 h-3.5 shrink-0 text-accent" /> : <FileText className="w-3.5 h-3.5 shrink-0 text-accent" />}
+                    <span className="truncate">{f.name}</span>
+                    <span className="text-text-tertiary shrink-0">{(f.size / 1024).toFixed(0)}KB</span>
+                    <button
+                      type="button"
+                      onClick={() => removeUploadedFile(f.id)}
+                      className="shrink-0 ml-0.5 text-text-tertiary hover:text-red-500 transition-colors"
+                      title="移除"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* 隐藏的文件选择器 */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              className="hidden"
+              onChange={handleFileSelect}
+              accept="*/*"
+            />
+
             <div className="flex items-end gap-2 bg-bg-secondary rounded-2xl border border-border p-2 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent transition-all">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isProcessing}
+                className="p-2 text-text-tertiary hover:text-accent transition-colors disabled:opacity-50 shrink-0"
+                title="上传文件作为对话上下文"
+              >
+                <Paperclip className="w-5 h-5" />
+              </button>
               <textarea
                 ref={textareaRef}
                 value={inputValue}
@@ -1447,6 +1577,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                   activeMode === 'plan' ? '描述你的需求，我会帮你规划方案（不执行）...' :
                   activeMode === 'debug' ? '描述问题现象，我会自动诊断修复...' :
                   activeMode === 'orchestrator' ? '描述复杂任务，我会分解并协调执行...' :
+                  activeMode === 'ask' ? '有什么问题尽管问，我会直接回答（不执行任何操作）...' :
                   '输入需求或 / 命令，如 /create-agent 或 "帮我创建Agent"'
                 }
                 rows={1}
@@ -1469,7 +1600,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             </div>
             <div className="flex items-center justify-between mt-2">
               <p className="text-xs text-text-tertiary">
-                {modeConfig.icon} {modeConfig.label} · {modeConfig.behavior === 'analyze_only' ? '仅规划' : modeConfig.behavior === 'execute_auto' ? '自动执行' : '需确认'}
+                {modeConfig.icon} {modeConfig.label} · {modeConfig.behavior === 'analyze_only' ? (activeMode === 'ask' ? '纯问答' : '仅规划') : modeConfig.behavior === 'execute_auto' ? '自动执行' : '需确认'}
               </p>
               <p className="text-xs text-text-tertiary">
                 `/help` 查看命令

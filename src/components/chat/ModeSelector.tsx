@@ -6,10 +6,21 @@
 import type { AgentMode, ModeConfig } from '../../types';
 import { cn } from '../../lib/utils';
 
+/**
+ * 各模式的品牌色（用于激活态高亮，让切换按钮一目了然）
+ */
+export const MODE_ACTIVE_CLASS: Record<AgentMode, string> = {
+  plan: 'bg-amber-500 text-white shadow-sm shadow-amber-200',
+  code: 'bg-violet-500 text-white shadow-sm shadow-violet-200',
+  debug: 'bg-red-500 text-white shadow-sm shadow-red-200',
+  orchestrator: 'bg-blue-500 text-white shadow-sm shadow-blue-200',
+  ask: 'bg-emerald-500 text-white shadow-sm shadow-emerald-200',
+};
+
 export const MODE_CONFIGS: ModeConfig[] = [
   {
     id: 'plan',
-    label: '规划模式',
+    label: '规划',
     description: '只分析和规划，不执行操作。适合先想清楚再动手。',
     icon: '💡',
     color: 'amber',
@@ -17,7 +28,7 @@ export const MODE_CONFIGS: ModeConfig[] = [
   },
   {
     id: 'code',
-    label: '编码模式',
+    label: '编码',
     description: '执行操作需确认后再落地。安全可靠，适合日常使用。',
     icon: '💻',
     color: 'violet',
@@ -25,7 +36,7 @@ export const MODE_CONFIGS: ModeConfig[] = [
   },
   {
     id: 'debug',
-    label: '调试模式',
+    label: '调试',
     description: '自动诊断问题并修复，聚焦排错和验证。',
     icon: '🔍',
     color: 'red',
@@ -33,11 +44,19 @@ export const MODE_CONFIGS: ModeConfig[] = [
   },
   {
     id: 'orchestrator',
-    label: '编排模式',
+    label: '编排',
     description: '协调多 Agent 和工作流并行执行，适合复杂任务。',
     icon: '🧩',
     color: 'blue',
     behavior: 'coordinate',
+  },
+  {
+    id: 'ask',
+    label: '问答',
+    description: '纯问答，不执行、不规划任何操作。适合咨询、解释、讨论。',
+    icon: '💬',
+    color: 'emerald',
+    behavior: 'analyze_only',
   },
 ];
 
@@ -54,14 +73,15 @@ export function ModeSelector({ activeMode, onModeChange }: ModeSelectorProps) {
           key={mode.id}
           onClick={() => onModeChange(mode.id)}
           className={cn(
-            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all active:scale-[0.98]',
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-[0.97]',
             activeMode === mode.id
-              ? `bg-white shadow-sm text-text-primary`
-              : 'text-text-tertiary hover:text-text-secondary hover:bg-white/50'
+              ? MODE_ACTIVE_CLASS[mode.id]
+              : 'text-text-tertiary hover:text-text-primary hover:bg-bg-hover'
           )}
           title={mode.description}
+          aria-pressed={activeMode === mode.id}
         >
-          <span className="text-sm">{mode.icon}</span>
+          <span className="text-sm leading-none">{mode.icon}</span>
           <span>{mode.label}</span>
         </button>
       ))}
