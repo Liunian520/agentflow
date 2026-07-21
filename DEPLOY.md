@@ -145,6 +145,21 @@ npm run build
 
 ---
 
+## SPA 路由配置（Cloudflare Pages 专用）
+
+本项目使用 React Router 实现客户端路由（/workflows, /agents 等）。
+Cloudflare Pages 默认按静态文件匹配路由，直接访问子路径会返回 404。
+
+已通过两个文件修复此问题：
+
+1. **`functions/[[path]].ts`** — catch-all Pages Function，拦截所有非静态资源请求并返回 index.html
+2. **`public/_routes.json`** — 路由配置，排除 /assets/*、favicon.svg 等静态资源
+
+> 注意：`public/_redirects` 是 Netlify 格式的路由配置，Cloudflare Pages 不识别此文件。
+> 如需部署到 Netlify，保留该文件即可；部署到 Cloudflare Pages 则依赖上述两个文件。
+
+---
+
 ## 注意事项
 
 1. **Render Free 限制**：15分钟无请求休眠，冷启动 10-30 秒。可每 5 分钟 Ping 一次 `/health` 保持活跃

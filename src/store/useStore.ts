@@ -1,18 +1,21 @@
 import { create } from 'zustand';
-import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog } from '../types';
+import { persist } from 'zustand/middleware';
+import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog, MetaSkill, ExecutionTrace, SubAgentDef, MCPServer, MCPTool } from '../types';
 import { mockWorkflows, mockAgents, mockPlugins, mockTemplates, mockMessages, nodeTemplates, mockHosts } from '../data/mockData';
 import { generateId } from '../lib/utils';
 import { sshApi } from '../api/sshApi';
+import { hashPassword, verifyPassword } from '../lib/passwordUtils';
+import { chatLLM, getChannelForModel, getAvailableChannelFromStore } from '../api/llmApi';
+import { INITIAL_META_SKILL } from '../lib/metaSkill';
 
-// 超级管理员账号（硬编码）
-const SUPER_ADMIN: User = {
-  id: 'admin-001',
-  username: 'Liunian',
-  password: 'qq2232401260',
-  role: 'admin',
-  avatar: '👑',
-  createdAt: '2024-01-01T00:00:00Z',
-};
+// ===== 检查点（命名快照，持久化） =====
+export interface Checkpoint {
+  id: string;
+  label: string;
+  timestamp: string;
+  nodes: any[];
+  edges: any[];
+}
 
 // 预置渠道模板
 export const providerPresets: Record<string, { baseUrl: string; models: { name: string; displayName: string }[] }> = {
@@ -59,7 +62,9 @@ export const providerPresets: Record<string, { baseUrl: string; models: { name: 
 interface AppState {
   // Auth
   currentUser: User | null;
-  login: (username: string, password: string) => boolean;
+  isFirstTime: boolean; // 是否首次使用（无管理员账号）
+  setupAdmin: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string) => Promise<boolean>;
   logout: () => void;
 
   // Channels
@@ -107,6 +112,7 @@ interface AppState {
   toggleSidebar: () => void;
   setSelectedNode: (id: string | null) => void;
   addMessage: (message: ChatMessage) => void;
+  updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
   togglePlugin: (id: string) => void;
   addNodeFromTemplate: (template: WorkflowNode & { defaultData?: Partial<NodeData> }) => void;
   createWorkflow: (name: string, templateId?: string) => string;
@@ -122,22 +128,62 @@ interface AppState {
   updateToolInNode: (workflowId: string, nodeId: string, toolId: string, updates: Partial<ToolConfig>) => void;
   removeToolFromNode: (workflowId: string, nodeId: string, toolId: string) => void;
   toggleToolEnabled: (workflowId: string, nodeId: string, toolId: string) => void;
+
+  // 检查点（命名快照，Undo/Checkpoint）
+  checkpoints: Record<string, Checkpoint[]>;
+  addCheckpoint: (workflowId: string, label: string, snapshot: { nodes: any[]; edges: any[] }) => void;
+  deleteCheckpoint: (workflowId: string, checkpointId: string) => void;
   startRun: () => void;
   stopRun: () => void;
 
   createAgent: (agent: Omit<Agent, 'id' | 'createdAt'>) => void;
   updateAgent: (id: string, updates: Partial<Agent>) => void;
   deleteAgent: (id: string) => void;
+
+  // Meta-Skill (Skill-MAS)
+  metaSkill: MetaSkill;
+  updateMetaSkill: (skill: MetaSkill) => void;
+
+  // Experience Bank
+  experienceBank: ExecutionTrace[];
+  addTrace: (trace: ExecutionTrace) => void;
+  clearTraces: () => void;
+
+  // MCP Servers (Phase 6：MCP 工具集成)
+  mcps: MCPServer[];
+  addMCP: (server: Omit<MCPServer, 'id' | 'createdAt' | 'status' | 'tools'>) => void;
+  updateMCP: (id: string, updates: Partial<MCPServer>) => void;
+  deleteMCP: (id: string) => void;
+  setMCPStatus: (id: string, status: MCPServer['status'], tools?: MCPTool[], lastError?: string) => void;
 }
 
-const STORAGE_KEY = 'agentflow_user';
+// ===== 工具解析辅助（Phase 6：将 MCP 工具标识解析为 OpenAI function 调用 schema） =====
+function resolveToolSchemas(toolIds?: string[]): any[] {
+  if (!toolIds || toolIds.length === 0) return [];
+  const mcps = useStore.getState().mcps || [];
+  const allTools = mcps.flatMap((m) => (m.enabled ? m.tools : []));
+  const selected = allTools.filter((t) => toolIds.includes(t.name));
+  return selected.map((t) => ({
+    type: 'function',
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters:
+        t.inputSchema && typeof t.inputSchema === 'object'
+          ? t.inputSchema
+          : { type: 'object', properties: {} },
+    },
+  }));
+}
 
+const USER_STORAGE_KEY = 'agentflow_user';
+const ADMIN_STORAGE_KEY = 'agentflow_admin';
+
+/** 从 localStorage 加载当前登录用户 */
 const loadUserFromStorage = (): User | null => {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored) {
-      return JSON.parse(stored);
-    }
+    const stored = localStorage.getItem(USER_STORAGE_KEY);
+    if (stored) return JSON.parse(stored);
   } catch (e) {
     console.error('Failed to load user from storage:', e);
   }
@@ -147,21 +193,80 @@ const loadUserFromStorage = (): User | null => {
 const saveUserToStorage = (user: User | null) => {
   try {
     if (user) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(user));
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
     } else {
-      localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(USER_STORAGE_KEY);
     }
   } catch (e) {
     console.error('Failed to save user to storage:', e);
   }
 };
 
-export const useStore = create<AppState>((set, get) => ({
+/** 从 localStorage 加载管理员凭据（哈希后的密码） */
+interface StoredAdmin {
+  id: string;
+  username: string;
+  passwordHash: string;
+  role: 'admin' | 'user';
+  avatar: string;
+  createdAt: string;
+}
+
+const loadAdminFromStorage = (): StoredAdmin | null => {
+  try {
+    const stored = localStorage.getItem(ADMIN_STORAGE_KEY);
+    if (stored) return JSON.parse(stored);
+  } catch (e) {
+    console.error('Failed to load admin from storage:', e);
+  }
+  return null;
+};
+
+const saveAdminToStorage = (admin: StoredAdmin) => {
+  try {
+    localStorage.setItem(ADMIN_STORAGE_KEY, JSON.stringify(admin));
+  } catch (e) {
+    console.error('Failed to save admin to storage:', e);
+  }
+};
+
+/** 判断是否首次使用 */
+const checkFirstTime = (): boolean => {
+  return !loadAdminFromStorage();
+};
+
+export const useStore = create<AppState>()(
+  persist(
+    (set, get) => ({
   // Auth
   currentUser: loadUserFromStorage(),
-  login: (username, password) => {
-    if (username === SUPER_ADMIN.username && password === SUPER_ADMIN.password) {
-      const user = { ...SUPER_ADMIN, password: '' };
+  isFirstTime: checkFirstTime(),
+  setupAdmin: async (username, password) => {
+    const passwordHash = await hashPassword(password);
+    const admin: StoredAdmin = {
+      id: `admin-${generateId()}`,
+      username,
+      passwordHash,
+      role: 'admin',
+      avatar: '👑',
+      createdAt: new Date().toISOString(),
+    };
+    saveAdminToStorage(admin);
+    // 自动登录
+    const user: User = { ...admin, password: '' };
+    set({ currentUser: user, isFirstTime: false });
+    saveUserToStorage(user);
+  },
+  login: async (username, password) => {
+    const admin = loadAdminFromStorage();
+    if (!admin) {
+      // 首次使用，需要先设置管理员
+      set({ isFirstTime: true });
+      return false;
+    }
+    const isMatch = await verifyPassword(password, admin.passwordHash);
+    if (isMatch && username === admin.username) {
+      const user: User = { ...admin, password: '' };
       set({ currentUser: user });
       saveUserToStorage(user);
       return true;
@@ -465,34 +570,324 @@ export const useStore = create<AppState>((set, get) => ({
           level: 'info',
           message: `调用大模型: ${config?.model || '默认模型'}`,
         });
-        const mockResult = `这是大模型生成的结果，基于提示词生成的模拟响应。当前时间: ${new Date().toLocaleTimeString()}`;
+
+        // 真实 LLM 调用
+        let llmResult: string;
+        try {
+          const targetModel = config?.model || 'gpt-4o';
+          const channelInfo = config?.channelId
+            ? (() => {
+                const ch = get().channels.find(c => c.id === config.channelId && c.enabled);
+                return ch ? { channelId: ch.id, provider: ch.provider, baseUrl: ch.baseUrl, apiKey: ch.apiKey } : null;
+              })()
+            : await getChannelForModel(targetModel) || await getAvailableChannelFromStore();
+
+          if (!channelInfo) {
+            // 没有可用渠道，使用模拟结果
+            llmResult = `[模拟] 未配置 LLM 渠道，请在渠道设置中添加 API Key。当前时间: ${new Date().toLocaleTimeString()}`;
+            newLogs.push({
+              id: `log-${generateId()}`,
+              nodeId: currentNode.id,
+              nodeName: currentNode.name,
+              timestamp: new Date().toISOString(),
+              level: 'warn',
+              message: '未找到可用的 LLM 渠道，使用模拟结果',
+            });
+          } else {
+            // 组装消息
+            const llmMessages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }> = [];
+            if (config?.systemPrompt) {
+              llmMessages.push({ role: 'system', content: config.systemPrompt });
+            }
+            // 用变量替换 userPrompt 中的 {{变量名}} 模板
+            let userContent = config?.userPrompt || '';
+            for (const [varName, varVal] of Object.entries(newVariables)) {
+              userContent = userContent.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
+            }
+            if (!userContent) {
+              userContent = '请根据上下文继续处理任务';
+            }
+            llmMessages.push({ role: 'user', content: userContent });
+
+            // Phase 6：解析 LLM 节点配置的 MCP 工具
+            const llmTools = resolveToolSchemas(config?.tools);
+
+            const result = await chatLLM({
+              channelId: channelInfo.channelId,
+              provider: channelInfo.provider as any,
+              baseUrl: channelInfo.baseUrl,
+              apiKey: channelInfo.apiKey,
+              model: targetModel,
+              messages: llmMessages,
+              temperature: config?.temperature ?? 0.7,
+              maxTokens: config?.maxTokens ?? 2048,
+              tools: llmTools,
+            });
+
+            if (result.success && result.content) {
+              llmResult = result.content;
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'success',
+                message: `大模型调用完成 (${result.provider}/${result.model})`,
+                data: { provider: result.provider, model: result.model },
+              });
+            } else {
+              llmResult = `[调用失败] ${result.message || '未知错误'}`;
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: `大模型调用失败: ${result.message}`,
+                data: { provider: result.provider, model: result.model },
+              });
+            }
+          }
+        } catch (error: any) {
+          llmResult = `[异常] ${error.message}`;
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `LLM 调用异常: ${error.message}`,
+          });
+        }
+
         const outputVar = config?.outputVariable || 'llm_output';
-        newVariables[outputVar] = mockResult;
-        newLogs.push({
-          id: `log-${generateId()}`,
-          nodeId: currentNode.id,
-          nodeName: currentNode.name,
-          timestamp: new Date().toISOString(),
-          level: 'success',
-          message: `大模型调用完成，输出写入变量 \`${outputVar}\``,
-          data: { [outputVar]: mockResult },
-        });
+        newVariables[outputVar] = llmResult;
         break;
       }
 
       case 'agent': {
+        const config = currentNode.defaultData?.agentConfig;
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
           nodeName: currentNode.name,
           timestamp: new Date().toISOString(),
           level: 'info',
-          message: 'Agent 开始执行任务...',
+          message: `Agent "${currentNode.name}" 开始执行任务...`,
         });
-        newVariables['agent_result'] = {
-          status: 'completed',
-          output: 'Agent 任务执行完成',
-          steps: 3,
+
+        // 真实 LLM 调用 — Agent 节点本质上是带 system prompt 的 LLM 调用
+        try {
+          const targetModel = config?.model || 'gpt-4o';
+          const channelInfo = await getChannelForModel(targetModel) || await getAvailableChannelFromStore();
+
+          if (!channelInfo) {
+            newVariables['agent_result'] = {
+              status: 'mock',
+              output: `[模拟] 未配置 LLM 渠道。Agent 执行完成（模拟结果）`,
+              steps: 0,
+            };
+            newLogs.push({
+              id: `log-${generateId()}`,
+              nodeId: currentNode.id,
+              nodeName: currentNode.name,
+              timestamp: new Date().toISOString(),
+              level: 'warn',
+              message: '未找到可用 LLM 渠道，使用模拟结果',
+            });
+          } else {
+            // 组装 Agent 消息
+            const agentMessages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }> = [];
+            if (config?.systemPrompt) {
+              agentMessages.push({ role: 'system', content: config.systemPrompt });
+            } else {
+              agentMessages.push({ role: 'system', content: '你是一个专业的 AI 助手，请完成以下任务。' });
+            }
+
+            // 从变量中获取上下文作为输入
+            const contextStr = Object.entries(newVariables)
+              .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+              .join('\n');
+            agentMessages.push({ role: 'user', content: contextStr || '请开始执行任务' });
+
+            // Phase 6：解析 Agent 配置的 MCP 工具
+            const agentTools = resolveToolSchemas(config?.tools);
+
+            const result = await chatLLM({
+              channelId: channelInfo.channelId,
+              provider: channelInfo.provider as any,
+              baseUrl: channelInfo.baseUrl,
+              apiKey: channelInfo.apiKey,
+              model: targetModel,
+              messages: agentMessages,
+              temperature: config?.temperature ?? 0.5,
+              maxTokens: config?.maxTokens ?? 2048,
+              tools: agentTools,
+            });
+
+            if (result.success && result.content) {
+              newVariables['agent_result'] = {
+                status: 'completed',
+                output: result.content,
+                model: result.model,
+                provider: result.provider,
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'success',
+                message: `Agent 任务执行完成 (${result.provider}/${result.model})`,
+                data: { output: result.content?.slice(0, 200) },
+              });
+            } else {
+              newVariables['agent_result'] = {
+                status: 'failed',
+                output: result.message || '未知错误',
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: `Agent 执行失败: ${result.message}`,
+              });
+            }
+          }
+        } catch (error: any) {
+          newVariables['agent_result'] = {
+            status: 'error',
+            output: error.message,
+          };
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `Agent 执行异常: ${error.message}`,
+          });
+        }
+        break;
+      }
+
+      // ===== SubAgent 并行编排（Phase 5：多 Agent 并行执行） =====
+      case 'subagent': {
+        const config = currentNode.defaultData?.subagentConfig;
+        const subAgents = config?.agents || [];
+
+        newLogs.push({
+          id: `log-${generateId()}`,
+          nodeId: currentNode.id,
+          nodeName: currentNode.name,
+          timestamp: new Date().toISOString(),
+          level: 'info',
+          message: `SubAgent 并行编排：启动 ${subAgents.length} 个子 Agent${config?.parallel === false ? '（串行）' : '（并行）'}`,
+        });
+
+        if (subAgents.length === 0) {
+          newVariables[config?.outputVariable || 'subagent_result'] = { agents: [], summary: '' };
+          break;
+        }
+
+        // 全部变量上下文（未指定 inputVariable 时使用）
+        const fullContext = Object.entries(newVariables)
+          .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+          .join('\n');
+
+        // 单个子 Agent 执行函数
+        const runOne = async (a: SubAgentDef) => {
+          const targetModel = a.model || 'gpt-4o';
+          const channelInfo = await getChannelForModel(targetModel) || await getAvailableChannelFromStore();
+          if (!channelInfo) {
+            return {
+              name: a.name,
+              status: 'mock',
+              output: `[模拟] 未配置 LLM 渠道，子 Agent「${a.name}」使用模拟结果`,
+              model: '',
+            };
+          }
+          const input =
+            a.inputVariable != null && newVariables[a.inputVariable] != null
+              ? `${a.inputVariable}: ${typeof newVariables[a.inputVariable] === 'string' ? newVariables[a.inputVariable] : JSON.stringify(newVariables[a.inputVariable])}`
+              : fullContext || '请开始执行任务';
+
+          const messages = [
+            { role: 'system' as const, content: a.systemPrompt || '你是一个专业的 AI 助手。' },
+            { role: 'user' as const, content: input },
+          ];
+          const tools = resolveToolSchemas(a.tools);
+
+          const r = await chatLLM({
+            channelId: channelInfo.channelId,
+            provider: channelInfo.provider as any,
+            baseUrl: channelInfo.baseUrl,
+            apiKey: channelInfo.apiKey,
+            model: targetModel,
+            messages,
+            temperature: a.temperature ?? 0.5,
+            maxTokens: a.maxTokens ?? 2048,
+            tools,
+          });
+
+          return {
+            name: a.name,
+            status: r.success ? 'completed' : 'failed',
+            output: r.success ? r.content : r.message || '未知错误',
+            model: r.model || '',
+          };
+        };
+
+        // 并行 / 串行调度
+        let results: Array<{ name: string; status: string; output: string; model: string }>;
+        if (config?.parallel === false) {
+          results = [];
+          for (const a of subAgents) results.push(await runOne(a));
+        } else {
+          results = await Promise.all(subAgents.map(runOne));
+        }
+
+        // 聚合各子 Agent 输出
+        const parts = results
+          .map((r) => `## ${r.name}${r.status !== 'completed' ? ` (${r.status})` : ''}\n${r.output}`)
+          .join('\n\n');
+        let summary = parts;
+        if (config?.aggregatorPrompt) {
+          try {
+            const aggChannel = await getAvailableChannelFromStore();
+            if (aggChannel) {
+              const agg = await chatLLM({
+                channelId: aggChannel.channelId,
+                provider: aggChannel.provider as any,
+                baseUrl: aggChannel.baseUrl,
+                apiKey: aggChannel.apiKey,
+                model: aggChannel.models[0]?.name || 'gpt-4o',
+                messages: [
+                  { role: 'system', content: config.aggregatorPrompt },
+                  { role: 'user', content: parts },
+                ],
+                temperature: 0.3,
+                maxTokens: 2048,
+              });
+              if (agg.success && agg.content) summary = agg.content;
+            }
+          } catch {
+            // 聚合失败则回退到原始拼接
+          }
+        }
+
+        const completedCount = results.filter((r) => r.status === 'completed').length;
+        newVariables[config?.outputVariable || 'subagent_result'] = {
+          agents: results,
+          summary,
+          status:
+            completedCount === results.length
+              ? 'completed'
+              : completedCount > 0
+                ? 'partial'
+                : 'failed',
         };
         newLogs.push({
           id: `log-${generateId()}`,
@@ -500,8 +895,7 @@ export const useStore = create<AppState>((set, get) => ({
           nodeName: currentNode.name,
           timestamp: new Date().toISOString(),
           level: 'success',
-          message: 'Agent 任务执行完成',
-          data: { steps: 3, tools_called: 2 },
+          message: `SubAgent 编排完成：${subAgents.length} 个子 Agent，${completedCount} 个成功`,
         });
         break;
       }
@@ -516,17 +910,122 @@ export const useStore = create<AppState>((set, get) => ({
           level: 'info',
           message: `执行 ${config?.language || 'javascript'} 代码`,
         });
+
         const outputVar = config?.outputVariable || 'code_output';
-        newVariables[outputVar] = { result: 42, processed: true };
-        newLogs.push({
-          id: `log-${generateId()}`,
-          nodeId: currentNode.id,
-          nodeName: currentNode.name,
-          timestamp: new Date().toISOString(),
-          level: 'success',
-          message: `代码执行完成，输出写入变量 \`${outputVar}\``,
-          data: { [outputVar]: newVariables[outputVar] },
-        });
+
+        // 代码执行通过后端代理（SSH 连接后执行）
+        // 如果没有配置远程主机，使用 LLM 来"解释"代码逻辑
+        try {
+          // 尝试通过已连接的 SSH 主机执行
+          const connectedHosts = get().hosts.filter((h: any) => h.status === 'online');
+          if (connectedHosts.length > 0 && config?.code) {
+            const host = connectedHosts[0];
+            // 变量替换
+            let code = config.code;
+            for (const [varName, varVal] of Object.entries(newVariables)) {
+              code = code.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
+            }
+
+            // 通过 SSH API 执行代码
+            const command = config.language === 'python'
+              ? `python3 -c '${code.replace(/'/g, "'\\''")}'`
+              : config.language === 'bash'
+              ? code
+              : `node -e '${code.replace(/'/g, "'\\''")}'`;
+
+            const sshResult = await sshApi.execute({
+              hostId: host.id,
+              command,
+            });
+
+            if (sshResult.success) {
+              newVariables[outputVar] = {
+                stdout: sshResult.stdout || '',
+                stderr: sshResult.stderr || '',
+                exitCode: 0,
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'success',
+                message: `代码在主机 ${host.name} 上执行完成`,
+                data: { host: host.name, stdout: sshResult.stdout?.slice(0, 200) },
+              });
+            } else {
+              newVariables[outputVar] = {
+                error: sshResult.message || '执行失败',
+                stderr: sshResult.stderr || '',
+                exitCode: 1,
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: `代码执行失败: ${sshResult.message}`,
+              });
+            }
+          } else {
+            // 没有可用的 SSH 主机 — 如果有 LLM 渠道，用 LLM 解释代码意图
+            const channelInfo = await getAvailableChannelFromStore();
+            if (channelInfo && config?.code) {
+              let code = config.code;
+              for (const [varName, varVal] of Object.entries(newVariables)) {
+                code = code.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
+              }
+
+              const result = await chatLLM({
+                channelId: channelInfo.channelId,
+                provider: channelInfo.provider as any,
+                baseUrl: channelInfo.baseUrl,
+                apiKey: channelInfo.apiKey,
+                model: channelInfo.models[0]?.name || 'gpt-4o',
+                messages: [
+                  { role: 'system', content: `你是一个代码执行助手。用户会给你一段 ${config.language || 'javascript'} 代码和输入变量，请模拟执行这段代码并返回结果。只输出执行结果，不要解释。` },
+                  { role: 'user', content: `代码:\n${code}\n\n变量:\n${JSON.stringify(newVariables)}` },
+                ],
+                temperature: 0.1,
+                maxTokens: 2048,
+              });
+
+              newVariables[outputVar] = result.success ? { result: result.content } : { error: result.message };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: result.success ? 'success' : 'error',
+                message: result.success
+                  ? `代码由 LLM 模拟执行完成 (无 SSH 主机可用)`
+                  : `代码执行失败: ${result.message}`,
+              });
+            } else {
+              // 完全模拟
+              newVariables[outputVar] = { result: '[模拟] 无可用主机或 LLM 渠道', simulated: true };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'warn',
+                message: '无 SSH 主机或 LLM 渠道，使用模拟结果',
+              });
+            }
+          }
+        } catch (error: any) {
+          newVariables[outputVar] = { error: error.message };
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `代码执行异常: ${error.message}`,
+          });
+        }
         break;
       }
 
@@ -540,21 +1039,105 @@ export const useStore = create<AppState>((set, get) => ({
           level: 'info',
           message: `发送 ${config?.method || 'GET'} 请求: ${config?.url || '未配置 URL'}`,
         });
-        const outputVar = config?.outputVariable || 'http_response';
-        newVariables[outputVar] = {
-          status: 200,
-          data: { success: true, message: '模拟响应' },
-          headers: { 'content-type': 'application/json' },
-        };
-        newLogs.push({
-          id: `log-${generateId()}`,
-          nodeId: currentNode.id,
-          nodeName: currentNode.name,
-          timestamp: new Date().toISOString(),
-          level: 'success',
-          message: `HTTP 请求成功 (200)`,
-          data: { status: 200, responseTime: '123ms' },
-        });
+
+        // 真实 HTTP 请求
+        try {
+          let url = config?.url || '';
+          // 变量替换 {{变量名}} 模板
+          for (const [varName, varVal] of Object.entries(newVariables)) {
+            url = url.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
+          }
+
+          if (!url) {
+            newLogs.push({
+              id: `log-${generateId()}`,
+              nodeId: currentNode.id,
+              nodeName: currentNode.name,
+              timestamp: new Date().toISOString(),
+              level: 'error',
+              message: '未配置请求 URL',
+            });
+            const outputVar = config?.outputVariable || 'http_response';
+            newVariables[outputVar] = { error: '未配置 URL' };
+          } else {
+            const method = config?.method || 'GET';
+            const headers: Record<string, string> = config?.headers || {};
+            let body: string | undefined;
+
+            if (method !== 'GET') {
+              if (config?.bodyType === 'json' && config?.body) {
+                body = config.body;
+                // 变量替换
+                for (const [varName, varVal] of Object.entries(newVariables)) {
+                  body = body!.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
+                }
+                headers['Content-Type'] = 'application/json';
+              } else if (config?.body) {
+                body = config.body;
+              }
+            }
+
+            const response = await fetch(url, {
+              method,
+              headers,
+              body,
+              signal: AbortSignal.timeout(config?.timeout || 10000),
+            });
+
+            const outputVar = config?.outputVariable || 'http_response';
+
+            if (response.ok) {
+              const contentType = response.headers.get('content-type') || '';
+              let data: any;
+              if (contentType.includes('application/json')) {
+                data = await response.json();
+              } else {
+                data = await response.text();
+              }
+
+              newVariables[outputVar] = {
+                status: response.status,
+                data,
+                headers: Object.fromEntries(response.headers.entries()),
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'success',
+                message: `HTTP 请求成功 (${response.status})`,
+                data: { status: response.status },
+              });
+            } else {
+              const errorText = await response.text().catch(() => '');
+              newVariables[outputVar] = {
+                status: response.status,
+                error: errorText.slice(0, 500),
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: `HTTP 请求失败 (${response.status}): ${errorText.slice(0, 100)}`,
+                data: { status: response.status },
+              });
+            }
+          }
+        } catch (error: any) {
+          const outputVar = config?.outputVariable || 'http_response';
+          newVariables[outputVar] = { error: error.message };
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `HTTP 请求异常: ${error.message}`,
+          });
+        }
         break;
       }
 
@@ -881,6 +1464,10 @@ export const useStore = create<AppState>((set, get) => ({
 
   addMessage: (message) =>
     set((state) => ({ messages: [...state.messages, message] })),
+  updateMessage: (id, updates) =>
+    set((state) => ({
+      messages: state.messages.map((m) => (m.id === id ? { ...m, ...updates } : m)),
+    })),
 
   addNodeFromTemplate: (template) => {
     const currentWorkflowId = get().currentWorkflowId;
@@ -1117,6 +1704,35 @@ export const useStore = create<AppState>((set, get) => ({
       }),
     })),
 
+  addCheckpoint: (workflowId, label, snapshot) =>
+    set((state) => {
+      const list = state.checkpoints[workflowId] || [];
+      const checkpoint: Checkpoint = {
+        id: `cp-${generateId()}`,
+        label: label.trim() || `检查点 ${list.length + 1}`,
+        timestamp: new Date().toISOString(),
+        nodes: JSON.parse(JSON.stringify(snapshot.nodes || [])),
+        edges: JSON.parse(JSON.stringify(snapshot.edges || [])),
+      };
+      return {
+        checkpoints: {
+          ...state.checkpoints,
+          [workflowId]: [...list, checkpoint],
+        },
+      };
+    }),
+
+  deleteCheckpoint: (workflowId, checkpointId) =>
+    set((state) => {
+      const list = state.checkpoints[workflowId] || [];
+      return {
+        checkpoints: {
+          ...state.checkpoints,
+          [workflowId]: list.filter((c) => c.id !== checkpointId),
+        },
+      };
+    }),
+
   startRun: () => set({ isRunning: true }),
   stopRun: () => set({ isRunning: false }),
 
@@ -1142,4 +1758,114 @@ export const useStore = create<AppState>((set, get) => ({
       agents: state.agents.filter((a) => a.id !== id),
       currentAgentId: state.currentAgentId === id ? null : state.currentAgentId,
     })),
-}));
+
+  // Meta-Skill (Skill-MAS)
+  metaSkill: INITIAL_META_SKILL,
+  updateMetaSkill: (skill) => set({ metaSkill: skill }),
+
+  // Experience Bank
+  experienceBank: [],
+  addTrace: (trace) =>
+    set((state) => ({ experienceBank: [...state.experienceBank, trace] })),
+  clearTraces: () => set({ experienceBank: [] }),
+
+  // MCP Servers
+  mcps: [],
+
+  // 检查点（命名快照）
+  checkpoints: {},
+  addMCP: (server) =>
+    set((state) => ({
+      mcps: [
+        ...state.mcps,
+        {
+          ...server,
+          id: generateId(),
+          status: 'disconnected',
+          tools: [],
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    })),
+  updateMCP: (id, updates) =>
+    set((state) => ({
+      mcps: state.mcps.map((m) => (m.id === id ? { ...m, ...updates } : m)),
+    })),
+  deleteMCP: (id) =>
+    set((state) => ({ mcps: state.mcps.filter((m) => m.id !== id) })),
+  setMCPStatus: (id, status, tools, lastError) =>
+    set((state) => ({
+      mcps: state.mcps.map((m) =>
+        m.id === id
+          ? { ...m, status, tools: tools ?? m.tools, lastError: lastError ?? m.lastError }
+          : m,
+      ),
+    })),
+    }),
+    {
+      name: 'agentflow-data',
+      // 只持久化业务数据，不持久化运行时状态
+      partialize: (state) => ({
+        currentUser: state.currentUser,
+        isFirstTime: state.isFirstTime,
+        workflows: state.workflows,
+        agents: state.agents,
+        channels: state.channels,
+        hosts: state.hosts,
+        plugins: state.plugins,
+        messages: state.messages,
+        currentWorkflowId: state.currentWorkflowId,
+        currentAgentId: state.currentAgentId,
+        sidebarCollapsed: state.sidebarCollapsed,
+        metaSkill: state.metaSkill,
+        experienceBank: state.experienceBank,
+        mcps: state.mcps,
+        checkpoints: state.checkpoints,
+      }),
+      // 存储序列化冲突时静默处理
+      storage: {
+        getItem: (name) => {
+          const str = localStorage.getItem(name);
+          if (!str) return null;
+          try {
+            return JSON.parse(str);
+          } catch {
+            localStorage.removeItem(name);
+            return null;
+          }
+        },
+        setItem: (name, value) => {
+          try {
+            localStorage.setItem(name, JSON.stringify(value));
+          } catch (e) {
+            console.error('localStorage quota exceeded, clearing old data:', e);
+            // quota exceeded: 清除最老的工作流数据以腾空间
+            try {
+              const parsed = JSON.parse(localStorage.getItem(name) || '{}');
+              if (parsed.state?.workflows?.length > 5) {
+                parsed.state.workflows = parsed.state.workflows.slice(0, 5);
+              }
+              if (parsed.state?.messages?.length > 100) {
+                parsed.state.messages = parsed.state.messages.slice(-100);
+              }
+              localStorage.setItem(name, JSON.stringify(parsed));
+            } catch {
+              localStorage.removeItem(name);
+            }
+          }
+        },
+        removeItem: (name) => localStorage.removeItem(name),
+      },
+      // 首次加载时：如果 localStorage 无数据，使用 mock 数据
+      merge: (persistedState, currentState) => {
+        // 如果 persistedState 为空或没有 workflows，保留 mock 数据
+        const persisted = persistedState as Partial<AppState> | null;
+        if (!persisted || !persisted.workflows || persisted.workflows.length === 0) {
+          return currentState;
+        }
+        // 合并：persisted 覆盖 currentState 的业务数据
+        return { ...currentState, ...persisted };
+      },
+    },
+  ),
+);

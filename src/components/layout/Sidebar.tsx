@@ -13,13 +13,15 @@ import {
   LogOut,
   Server,
   X,
+  MessageSquare,
 } from 'lucide-react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store/useStore';
 import { cn } from '../../lib/utils';
 
 const navItems = [
-  { to: '/', icon: LayoutGrid, label: '工作台' },
+  { to: '/workspace', icon: MessageSquare, label: '对话工作台' },
+  { to: '/dashboard', icon: LayoutGrid, label: '工作台' },
   { to: '/workflows', icon: Workflow, label: '工作流' },
   { to: '/agents', icon: Bot, label: 'Agent' },
   { to: '/hosts', icon: Server, label: '远程主机' },

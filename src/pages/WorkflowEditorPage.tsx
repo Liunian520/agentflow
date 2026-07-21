@@ -26,6 +26,11 @@ import {
   SlidersHorizontal,
   X,
   Check,
+  Undo2,
+  Redo2,
+  Bookmark,
+  Trash2,
+  Plus,
 } from 'lucide-react';
 import { NodePanel } from '../components/workflow/NodePanel';
 import { PropertiesPanel } from '../components/workflow/PropertiesPanel';
@@ -97,10 +102,100 @@ export function WorkflowEditorPage() {
   const [showExecutionPanel, setShowExecutionPanel] = useState(false);
   const [isDirty, setIsDirty] = useState(false);
 
-  const { workflows, updateWorkflow, removeWorkflowNode, duplicateWorkflowNode, executionState, startExecution, stopExecution, currentWorkflowId, setCurrentWorkflow } = useStore();
+  const { workflows, updateWorkflow, removeWorkflowNode, duplicateWorkflowNode, executionState, startExecution, stopExecution, currentWorkflowId, setCurrentWorkflow, checkpoints, addCheckpoint, deleteCheckpoint } = useStore();
   const workflowsLoaded = useStore((s) => s.workflows.length > 0);
   const currentWorkflow = id ? workflows.find((w) => w.id === id) : null;
   const lastNodeCountRef = useRef<number>(0);
+
+  // ===== Undo / Redo 历史（作用于画布本地 nodes/edges） =====
+  const nodesRef = useRef<Node[]>(nodes);
+  const edgesRef = useRef<Edge[]>(edges);
+  useEffect(() => {
+    nodesRef.current = nodes;
+    edgesRef.current = edges;
+  }, [nodes, edges]);
+
+  type GraphSnap = { nodes: Node[]; edges: Edge[] };
+  const MAX_HISTORY = 50;
+  const historyRef = useRef<{ past: GraphSnap[]; future: GraphSnap[] }>({ past: [], future: [] });
+  const [, forceHistoryRender] = useState(0);
+
+  const cloneGraph = (n: Node[], e: Edge[]): GraphSnap => ({
+    nodes: JSON.parse(JSON.stringify(n)),
+    edges: JSON.parse(JSON.stringify(e)),
+  });
+
+  const pushSnapshot = useCallback(() => {
+    historyRef.current = {
+      past: [...historyRef.current.past, cloneGraph(nodesRef.current, edgesRef.current)].slice(-MAX_HISTORY),
+      future: [],
+    };
+    forceHistoryRender((t) => t + 1);
+  }, []);
+
+  const commit = useCallback(
+    (mutate: (cur: GraphSnap) => GraphSnap) => {
+      pushSnapshot();
+      const next = mutate(cloneGraph(nodesRef.current, edgesRef.current));
+      setNodes(next.nodes);
+      setEdges(next.edges);
+      setIsDirty(true);
+    },
+    [pushSnapshot, setNodes, setEdges],
+  );
+
+  const undo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.past.length === 0) return;
+    const prev = h.past[h.past.length - 1];
+    const cur = cloneGraph(nodesRef.current, edgesRef.current);
+    historyRef.current = {
+      past: h.past.slice(0, -1),
+      future: [cur, ...h.future].slice(0, MAX_HISTORY),
+    };
+    forceHistoryRender((t) => t + 1);
+    setNodes(prev.nodes);
+    setEdges(prev.edges);
+    setIsDirty(true);
+  }, [setNodes, setEdges]);
+
+  const redo = useCallback(() => {
+    const h = historyRef.current;
+    if (h.future.length === 0) return;
+    const next = h.future[0];
+    const cur = cloneGraph(nodesRef.current, edgesRef.current);
+    historyRef.current = {
+      past: [...h.past, cur].slice(-MAX_HISTORY),
+      future: h.future.slice(1),
+    };
+    forceHistoryRender((t) => t + 1);
+    setNodes(next.nodes);
+    setEdges(next.edges);
+    setIsDirty(true);
+  }, [setNodes, setEdges]);
+
+  const canUndo = historyRef.current.past.length > 0;
+  const canRedo = historyRef.current.future.length > 0;
+
+  // 检查点弹层
+  const [showCheckpoint, setShowCheckpoint] = useState(false);
+  const [cpLabel, setCpLabel] = useState('');
+
+  const createCheckpoint = () => {
+    if (!id) return;
+    addCheckpoint(id, cpLabel, { nodes: nodesRef.current, edges: edgesRef.current });
+    setCpLabel('');
+    setShowCheckpoint(false);
+  };
+
+  const restoreCheckpoint = (cp: { nodes: Node[]; edges: Edge[] }) => {
+    const snap = cloneGraph(cp.nodes, cp.edges);
+    pushSnapshot();
+    setNodes(snap.nodes);
+    setEdges(snap.edges);
+    setIsDirty(true);
+    setShowCheckpoint(false);
+  };
 
   // 路由不存在：等待加载完成，避免误判
   const isNotFound = workflowsLoaded && id && !currentWorkflow;
@@ -152,27 +247,29 @@ export function WorkflowEditorPage() {
 
   const handleNodesChange = useCallback(
     (changes: any[]) => {
-      // 当节点被添加、删除、位置改变时标记为脏
+      // 当节点被添加、删除、位置改变（拖拽结束）时记录历史快照
       const hasSignificantChange = changes.some(
         (c) => c.type === 'remove' || c.type === 'add' || (c.type === 'position' && c.dragging === false)
       );
+      if (hasSignificantChange) pushSnapshot();
       onNodesChange(changes);
       if (hasSignificantChange) {
         setIsDirty(true);
       }
     },
-    [onNodesChange]
+    [onNodesChange, pushSnapshot]
   );
 
   const handleEdgesChange = useCallback(
     (changes: any[]) => {
       const hasChange = changes.some((c) => c.type === 'remove' || c.type === 'add');
+      if (hasChange) pushSnapshot();
       onEdgesChange(changes);
       if (hasChange) {
         setIsDirty(true);
       }
     },
-    [onEdgesChange]
+    [onEdgesChange, pushSnapshot]
   );
 
   const onConnect = useCallback(
@@ -180,19 +277,19 @@ export function WorkflowEditorPage() {
       if (!params.source || !params.target) return;
       // 防止自连接
       if (params.source === params.target) return;
-      setEdges((eds) =>
-        addEdge(
+      commit((cur) => ({
+        nodes: cur.nodes,
+        edges: addEdge(
           {
             ...params,
             id: `edge-${generateId()}`,
             animated: false,
           },
-          eds
-        )
-      );
-      setIsDirty(true);
+          cur.edges
+        ),
+      }));
     },
-    [setEdges]
+    [commit]
   );
 
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -230,9 +327,9 @@ export function WorkflowEditorPage() {
         },
       };
 
-      setNodes((nds) => nds.concat(newNode));
+      commit((cur) => ({ nodes: [...cur.nodes, newNode], edges: cur.edges }));
     },
-    [reactFlowInstance, setNodes, id]
+    [reactFlowInstance, commit, id]
   );
 
   const onDragStart = (event: React.DragEvent, nodeTemplate: any) => {
@@ -253,9 +350,12 @@ export function WorkflowEditorPage() {
 
   const handleDeleteNode = () => {
     if (selectedNode && id) {
-      setNodes((nds) => nds.filter((n) => n.id !== selectedNode.id));
-      setEdges((eds) => eds.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
-      removeWorkflowNode(id, selectedNode.id);
+      const delId = selectedNode.id;
+      commit((cur) => ({
+        nodes: cur.nodes.filter((n) => n.id !== delId),
+        edges: cur.edges.filter((e) => e.source !== delId && e.target !== delId),
+      }));
+      removeWorkflowNode(id, delId);
       setSelectedNode(null);
       setShowPropertiesMobile(false);
     }
@@ -274,8 +374,9 @@ export function WorkflowEditorPage() {
           ...selectedNode.data,
           label: `${selectedNode.data.label} (副本)`,
         },
+        selected: false,
       };
-      setNodes((nds) => nds.concat(newNode));
+      commit((cur) => ({ nodes: [...cur.nodes, newNode], edges: cur.edges }));
       duplicateWorkflowNode(id, selectedNode.id);
       setSelectedNode(newNode);
     }
@@ -346,6 +447,28 @@ export function WorkflowEditorPage() {
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
   }, [isDirty]);
+
+  // 键盘快捷键：Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Shift+Z 或 Ctrl/Cmd+Y 重做
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (key === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [undo, redo]);
 
   const statusConfig = {
     draft: { label: '草稿', color: 'bg-gray-100 text-gray-600' },
@@ -444,6 +567,97 @@ export function WorkflowEditorPage() {
             )}
             <span className="hidden sm:inline">{isSaving ? '保存中...' : saveSuccess ? '已保存' : '保存'}</span>
           </button>
+          {/* Undo / Redo / 检查点 */}
+          <div className="hidden md:flex items-center gap-1">
+            <button
+              onClick={undo}
+              disabled={!canUndo}
+              title="撤销 (Ctrl+Z)"
+              className={cn(
+                'p-2 rounded-md transition-colors active:scale-95',
+                canUndo ? 'text-text-secondary hover:text-text-primary hover:bg-bg-hover' : 'text-text-tertiary opacity-40 cursor-not-allowed'
+              )}
+            >
+              <Undo2 className="w-4 h-4" />
+            </button>
+            <button
+              onClick={redo}
+              disabled={!canRedo}
+              title="重做 (Ctrl+Shift+Z)"
+              className={cn(
+                'p-2 rounded-md transition-colors active:scale-95',
+                canRedo ? 'text-text-secondary hover:text-text-primary hover:bg-bg-hover' : 'text-text-tertiary opacity-40 cursor-not-allowed'
+              )}
+            >
+              <Redo2 className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* 检查点弹层 */}
+          <div className="relative hidden md:block">
+            <button
+              onClick={() => setShowCheckpoint((v) => !v)}
+              title="检查点"
+              className={cn(
+                'flex items-center gap-1.5 px-2 py-2 rounded-md transition-colors',
+                showCheckpoint ? 'text-accent bg-accent/10' : 'text-text-secondary hover:text-text-primary hover:bg-bg-hover'
+              )}
+            >
+              <Bookmark className="w-4 h-4" />
+            </button>
+            {showCheckpoint && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowCheckpoint(false)} />
+                <div className="absolute right-0 top-11 z-50 w-72 bg-white border border-border rounded-lg shadow-xl p-3 space-y-2">
+                  <div className="text-xs font-semibold text-text-primary">检查点</div>
+                  <div className="flex gap-2">
+                    <input
+                      value={cpLabel}
+                      onChange={(e) => setCpLabel(e.target.value)}
+                      placeholder="检查点名称（可选）"
+                      onKeyDown={(e) => { if (e.key === 'Enter') createCheckpoint(); }}
+                      className="flex-1 px-2 py-1.5 text-xs border border-border rounded-md focus:outline-none focus:border-accent"
+                    />
+                    <button
+                      onClick={createCheckpoint}
+                      className="flex items-center gap-1 px-2 py-1.5 text-xs text-white bg-accent hover:bg-accent-hover rounded-md transition-colors active:scale-95"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      创建
+                    </button>
+                  </div>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {(checkpoints[id || ''] || []).length === 0 && (
+                      <p className="text-xs text-text-tertiary py-2 text-center">暂无检查点</p>
+                    )}
+                    {(checkpoints[id || ''] || []).slice().reverse().map((cp) => (
+                      <div key={cp.id} className="flex items-center gap-2 p-2 rounded-md hover:bg-bg-secondary">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-text-primary truncate">{cp.label}</div>
+                          <div className="text-[10px] text-text-tertiary">
+                            {new Date(cp.timestamp).toLocaleString()} · {cp.nodes.length} 节点
+                          </div>
+                        </div>
+                        <button
+                          onClick={() => restoreCheckpoint(cp)}
+                          className="px-2 py-1 text-[11px] text-accent hover:bg-accent/10 rounded-md transition-colors"
+                        >
+                          恢复
+                        </button>
+                        <button
+                          onClick={() => id && deleteCheckpoint(id, cp.id)}
+                          className="p-1 text-text-tertiary hover:text-red-500 transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
           <button className="hidden sm:block p-1.5 text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors">
             <Settings className="w-4 h-4" />
           </button>
@@ -462,10 +676,9 @@ export function WorkflowEditorPage() {
           </button>
           <button
             onClick={() => {
-              const confirmed = confirm('确定要清空当前画布吗？此操作不可撤销。');
+              const confirmed = confirm('确定要清空当前画布吗？此操作可通过撤销恢复。');
               if (confirmed) {
-                setNodes([]);
-                setEdges([]);
+                commit(() => ({ nodes: [], edges: [] }));
               }
             }}
             className="p-2 -mr-2 text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-md transition-colors active:scale-95"

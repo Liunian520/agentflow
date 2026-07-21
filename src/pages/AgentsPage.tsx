@@ -18,15 +18,18 @@ import {
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
 import type { Agent } from '../types';
+import { chatLLMStreamEnhanced, getAvailableChannelFromStore, getChannelForModel } from '../api/llmApi';
 
 type DrawerType = 'settings' | 'create' | 'manage' | 'more' | null;
 
 const avatarOptions = ['🤖', '💻', '✍️', '📊', '🎨', '🧠', '🚀', '⚡', '🔬', '📚'];
-const toolOptions = ['web-search', 'code-executor', 'github', 'grammar-check', 'seo-tool', 'python', 'chart-generator', 'database'];
 
 export function AgentsPage() {
-  const { agents, messages, addMessage, createAgent, updateAgent, deleteAgent, getAvailableModels, channels } = useStore();
+  const { agents, messages, addMessage, createAgent, updateAgent, deleteAgent, getAvailableModels, channels, mcps } = useStore();
   const availableModels = getAvailableModels();
+  // Phase 6：Agent 工具从已配置的 MCP 服务器中勾选
+  const mcpToolOptions = mcps.flatMap((m) => (m.enabled ? m.tools : [])).map((t) => t.name);
+  const mcpToolSet = new Set(mcpToolOptions);
   const [inputValue, setInputValue] = useState('');
   const [selectedAgent, setSelectedAgent] = useState<string | undefined>(agents[0]?.id);
   const [showMobileAgents, setShowMobileAgents] = useState(false);
@@ -66,7 +69,9 @@ export function AgentsPage() {
     setTimeout(() => setToast(null), 2000);
   };
 
-  const handleSend = () => {
+  const streamAbortRef = useRef<AbortController | null>(null);
+
+  const handleSend = async () => {
     if (!inputValue.trim()) return;
     if (inputValue.length > 4000) {
       showToast('消息长度不能超过 4000 字符');
@@ -78,20 +83,94 @@ export function AgentsPage() {
       role: 'user' as const,
       content: inputValue,
       timestamp: new Date().toISOString(),
+      agentId: selectedAgent,
     };
     addMessage(userMessage);
     setInputValue('');
 
-    setTimeout(() => {
-      const aiMessage = {
-        id: generateId(),
-        role: 'assistant' as const,
-        content: `好的，我来帮您处理这个问题。\n\n基于您的描述，我建议：\n1. 首先明确工作流的目标和触发条件\n2. 设计节点之间的数据流\n3. 添加必要的错误处理和重试机制\n\n您希望我帮您创建一个工作流模板吗？`,
-        timestamp: new Date().toISOString(),
-        agentId: selectedAgent,
-      };
-      addMessage(aiMessage);
-    }, 1000);
+    // 获取当前 Agent 配置
+    const agent = agents.find(a => a.id === selectedAgent);
+    const targetModel = agent?.model || 'gpt-4o';
+    const channelInfo = await getChannelForModel(targetModel) || await getAvailableChannelFromStore();
+
+    if (!channelInfo) {
+      // 没有可用 LLM 渠道，回退到模拟
+      setTimeout(() => {
+        const aiMessage = {
+          id: generateId(),
+          role: 'assistant' as const,
+          content: `⚠️ 未配置 LLM 渠道，无法调用 AI。请在「渠道设置」中添加 API Key。\n\n当前为模拟回复：\n好的，我来帮您处理这个问题。基于您的描述，我建议先明确目标，再设计具体流程。`,
+          timestamp: new Date().toISOString(),
+          agentId: selectedAgent,
+        };
+        addMessage(aiMessage);
+      }, 500);
+      return;
+    }
+
+    // 创建流式占位消息
+    const streamMsgId = generateId();
+    const streamMsg = {
+      id: streamMsgId,
+      role: 'assistant' as const,
+      content: '',
+      timestamp: new Date().toISOString(),
+      agentId: selectedAgent,
+    };
+    addMessage(streamMsg);
+
+    // 组装 LLM 请求消息
+    const agentSystemPrompt = agent?.systemPrompt || '你是一个专业的 AI 助手。';
+    const recentMessages = useStore.getState().messages
+      .filter(m => m.agentId === selectedAgent || (!m.agentId && selectedAgent))
+      .slice(-8)
+      .map(m => ({
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      }));
+
+    const llmMessages = [
+      { role: 'system' as const, content: agentSystemPrompt },
+      ...recentMessages,
+      { role: 'user' as const, content: inputValue },
+    ];
+
+    // 发起 SSE 流式调用
+    const abortController = chatLLMStreamEnhanced(
+      {
+        channelId: channelInfo.channelId,
+        provider: channelInfo.provider as any,
+        baseUrl: channelInfo.baseUrl,
+        apiKey: channelInfo.apiKey,
+        model: targetModel,
+        messages: llmMessages,
+        temperature: agent?.temperature ?? 0.7,
+        maxTokens: agent?.maxTokens ?? 2048,
+      },
+      {
+        onDelta: (data) => {
+          // 实时更新流式消息内容
+          const fullContent = data.fullContent || '';
+          useStore.getState().updateMessage(streamMsgId, { content: fullContent });
+        },
+        onDone: (data) => {
+          // 确保最终内容完整
+          const finalContent = data.content || '';
+          if (finalContent) {
+            useStore.getState().updateMessage(streamMsgId, { content: finalContent });
+          }
+          streamAbortRef.current = null;
+        },
+        onError: (data) => {
+          useStore.getState().updateMessage(streamMsgId, {
+            content: `❌ AI 回复失败: ${data.message}\n\n请检查渠道设置。`,
+          });
+          streamAbortRef.current = null;
+        },
+      }
+    );
+
+    streamAbortRef.current = abortController;
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -332,26 +411,56 @@ export function AgentsPage() {
       </div>
 
       <div>
-        <label className="block text-sm font-medium text-text-primary mb-2">工具能力</label>
-        <div className="flex flex-wrap gap-1.5">
-          {toolOptions.map((tool) => {
-            const selected = (form.tools || []).includes(tool);
-            return (
-              <button
-                key={tool}
-                onClick={() => toggleTool(tool, isCreate)}
-                className={cn(
-                  'px-2.5 py-1 text-xs rounded-full transition-all active:scale-95',
-                  selected
-                    ? 'bg-accent text-white'
-                    : 'bg-bg-secondary text-text-secondary hover:bg-bg-hover'
-                )}
-              >
-                {tool}
-              </button>
-            );
-          })}
-        </div>
+        <label className="block text-sm font-medium text-text-primary mb-2">工具能力（MCP）</label>
+        {mcpToolOptions.length === 0 ? (
+          <div className="px-3 py-3 text-sm border border-dashed border-border bg-bg-secondary rounded-md text-text-tertiary">
+            尚未配置任何 MCP 工具服务器。请前往
+            <a href="/settings" className="text-accent hover:underline mx-1">系统设置 → MCP 服务器</a>
+            添加后在此勾选。
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-1.5">
+              {mcpToolOptions.map((tool) => {
+                const selected = (form.tools || []).includes(tool);
+                return (
+                  <button
+                    key={tool}
+                    onClick={() => toggleTool(tool, isCreate)}
+                    className={cn(
+                      'px-2.5 py-1 text-xs rounded-full transition-all active:scale-95',
+                      selected
+                        ? 'bg-accent text-white'
+                        : 'bg-bg-secondary text-text-secondary hover:bg-bg-hover'
+                    )}
+                  >
+                    {tool}
+                  </button>
+                );
+              })}
+            </div>
+            {/* 保留并展示旧版自由字符串工具，可一键移除 */}
+            {(form.tools || []).filter((t) => !mcpToolSet.has(t)).length > 0 && (
+              <div className="mt-2 pt-2 border-t border-border">
+                <div className="text-[11px] text-text-tertiary mb-1.5">未匹配 MCP 的旧工具：</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(form.tools || [])
+                    .filter((t) => !mcpToolSet.has(t))
+                    .map((tool) => (
+                      <button
+                        key={tool}
+                        onClick={() => toggleTool(tool, isCreate)}
+                        className="px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors"
+                        title="点击移除"
+                      >
+                        {tool} ×
+                      </button>
+                    ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
     </div>
   );

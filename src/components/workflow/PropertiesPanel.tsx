@@ -3,7 +3,7 @@ import { X, Trash2, Copy, Play, Plus, Settings, Bot, Trash } from 'lucide-react'
 import { cn } from '../../lib/utils';
 import * as Icons from 'lucide-react';
 import type { Node } from 'reactflow';
-import type { NodeType } from '../../types';
+import type { NodeType, SubAgentDef } from '../../types';
 import { useStore } from '../../store/useStore';
 
 interface PropertiesPanelProps {
@@ -54,6 +54,7 @@ const typeColors: Record<string, string> = {
   condition: 'bg-violet-500',
   loop: 'bg-pink-500',
   subworkflow: 'bg-indigo-500',
+  subagent: 'bg-violet-600',
   'human-in-loop': 'bg-rose-500',
   host: 'bg-gray-600',
 };
@@ -119,7 +120,7 @@ export function PropertiesPanel({
 }: PropertiesPanelProps) {
   const [activeTab, setActiveTab] = useState<'basic' | 'config'>('basic');
 
-  const { updateWorkflowNode, workflows, hosts, channels } = useStore();
+  const { updateWorkflowNode, workflows, hosts, channels, mcps } = useStore();
 
   const workflow = workflows.find((w) => w.id === workflowId);
 
@@ -177,7 +178,7 @@ export function PropertiesPanel({
     selectedNode.data[configKey] = updatedConfig;
   };
 
-  const showConfigTab = ['llm', 'agent', 'code', 'http', 'host', 'condition', 'loop', 'variable', 'database', 'knowledge', 'template', 'subworkflow', 'human-in-loop', 'start', 'end'].includes(nodeType);
+  const showConfigTab = ['llm', 'agent', 'code', 'http', 'host', 'condition', 'loop', 'variable', 'database', 'knowledge', 'template', 'subworkflow', 'subagent', 'human-in-loop', 'start', 'end'].includes(nodeType);
 
   const renderConfigContent = () => {
     switch (nodeType) {
@@ -319,6 +320,17 @@ export function PropertiesPanel({
 
       case 'llm': {
         const config = selectedNode.data.llmConfig;
+        const llmMcpTools = mcps.flatMap((m) =>
+          m.tools.map((t) => ({ server: m.name, name: t.name, desc: t.description })),
+        );
+        const llmMcpNameSet = new Set(llmMcpTools.map((t) => t.name));
+        const toggleLlmTool = (toolName: string) => {
+          const cur = config?.tools || [];
+          handleConfigChange(
+            'tools',
+            cur.includes(toolName) ? cur.filter((t: string) => t !== toolName) : [...cur, toolName],
+          );
+        };
         return (
           <div className="p-4 space-y-4">
             <div>
@@ -391,12 +403,78 @@ export function PropertiesPanel({
                 className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
               />
             </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">工具能力（MCP）</label>
+              {llmMcpTools.length === 0 ? (
+                <div className="text-xs text-text-tertiary px-3 py-2 border border-dashed border-border rounded-md">
+                  尚未配置 MCP 工具，请到「系统设置 → MCP 服务器」添加后在此勾选。
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-1.5">
+                    {llmMcpTools.map((t) => {
+                      const selected = (config?.tools || []).includes(t.name);
+                      return (
+                        <button
+                          key={`${t.server}-${t.name}`}
+                          title={t.desc}
+                          onClick={() => toggleLlmTool(t.name)}
+                          className={cn(
+                            'px-2 py-1 text-xs rounded-full transition-colors',
+                            selected
+                              ? 'bg-accent text-white'
+                              : 'bg-bg-secondary text-text-secondary hover:bg-accent/10',
+                          )}
+                        >
+                          {t.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(config?.tools || []).filter((t: string) => !llmMcpNameSet.has(t)).length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-border">
+                      <div className="text-[11px] text-text-tertiary mb-1">未匹配 MCP 的旧工具（点击移除）：</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(config?.tools || [])
+                          .filter((t: string) => !llmMcpNameSet.has(t))
+                          .map((tool: string) => (
+                            <button
+                              key={tool}
+                              onClick={() =>
+                                handleConfigChange(
+                                  'tools',
+                                  (config?.tools || []).filter((x: string) => x !== tool),
+                                )
+                              }
+                              className="px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors"
+                            >
+                              {tool} ×
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         );
       }
 
       case 'agent': {
         const config = selectedNode.data.agentConfig;
+        const availableMcpTools = mcps.flatMap((m) =>
+          m.tools.map((t) => ({ server: m.name, name: t.name, desc: t.description })),
+        );
+        const mcpToolNameSet = new Set(availableMcpTools.map((t) => t.name));
+        const toggleMcpTool = (toolName: string) => {
+          const cur = config?.tools || [];
+          handleConfigChange(
+            'tools',
+            cur.includes(toolName) ? cur.filter((t: string) => t !== toolName) : [...cur, toolName],
+          );
+        };
         return (
           <div className="p-4 space-y-4">
             <div>
@@ -450,42 +528,215 @@ export function PropertiesPanel({
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-text-primary mb-2">工具列表</label>
-              <div className="space-y-2">
-                {(config?.tools || []).map((tool: string, index: number) => (
-                  <div key={index} className="flex gap-2">
+              <label className="block text-sm font-medium text-text-primary mb-2">工具能力（MCP）</label>
+              {availableMcpTools.length === 0 ? (
+                <div className="text-xs text-text-tertiary px-3 py-2 border border-dashed border-border rounded-md">
+                  尚未配置 MCP 工具，请到「系统设置 → MCP 服务器」添加后在此勾选。
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-1.5">
+                    {availableMcpTools.map((t) => {
+                      const selected = (config?.tools || []).includes(t.name);
+                      return (
+                        <button
+                          key={`${t.server}-${t.name}`}
+                          title={t.desc}
+                          onClick={() => toggleMcpTool(t.name)}
+                          className={cn(
+                            'px-2 py-1 text-xs rounded-full transition-colors',
+                            selected
+                              ? 'bg-accent text-white'
+                              : 'bg-bg-secondary text-text-secondary hover:bg-accent/10',
+                          )}
+                        >
+                          {t.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(config?.tools || []).filter((t: string) => !mcpToolNameSet.has(t)).length > 0 && (
+                    <div className="mt-2 pt-2 border-t border-border">
+                      <div className="text-[11px] text-text-tertiary mb-1">未匹配 MCP 的旧工具（点击移除）：</div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {(config?.tools || [])
+                          .filter((t: string) => !mcpToolNameSet.has(t))
+                          .map((tool: string) => (
+                            <button
+                              key={tool}
+                              onClick={() =>
+                                handleConfigChange(
+                                  'tools',
+                                  (config?.tools || []).filter((x: string) => x !== tool),
+                                )
+                              }
+                              className="px-2 py-0.5 text-[11px] rounded-full bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors"
+                            >
+                              {tool} ×
+                            </button>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      case 'subagent': {
+        const config = selectedNode.data.subagentConfig;
+        const availableTools = mcps.flatMap((m) =>
+          m.tools.map((t) => ({ server: m.name, name: t.name, desc: t.description })),
+        );
+
+        const updateSubAgent = (idx: number, patch: Partial<SubAgentDef>) => {
+          const agents = [...(config?.agents || [])];
+          agents[idx] = { ...agents[idx], ...patch };
+          handleConfigChange('agents', agents);
+        };
+        const removeSubAgent = (idx: number) => {
+          handleConfigChange('agents', (config?.agents || []).filter((_a: any, i: number) => i !== idx));
+        };
+        const addSubAgent = () => {
+          handleConfigChange('agents', [
+            ...(config?.agents || []),
+            {
+              id: `sub-${Date.now()}`,
+              name: '新子 Agent',
+              model: 'gpt-4o',
+              systemPrompt: '',
+              temperature: 0.7,
+              tools: [],
+            },
+          ]);
+        };
+        const toggleTool = (idx: number, toolName: string) => {
+          const tools = config?.agents?.[idx]?.tools || [];
+          const next = tools.includes(toolName)
+            ? tools.filter((t: string) => t !== toolName)
+            : [...tools, toolName];
+          updateSubAgent(idx, { tools: next });
+        };
+
+        return (
+          <div className="p-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <label className="text-sm font-medium text-text-primary">并行执行</label>
+              <input
+                type="checkbox"
+                checked={config?.parallel !== false}
+                onChange={(e) => handleConfigChange('parallel', e.target.checked)}
+                className="accent-accent"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">输出变量</label>
+              <input
+                defaultValue={config?.outputVariable || 'subagent_result'}
+                onBlur={(e) => handleConfigChange('outputVariable', e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-1.5">
+                聚合提示词（可选）
+              </label>
+              <textarea
+                defaultValue={config?.aggregatorPrompt}
+                placeholder="将各子 Agent 输出整合为最终交付物的总编辑提示"
+                rows={3}
+                onBlur={(e) => handleConfigChange('aggregatorPrompt', e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent resize-none"
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-text-primary">
+                  子 Agent（{config?.agents?.length || 0}）
+                </label>
+                <button
+                  onClick={addSubAgent}
+                  className="flex items-center gap-1 px-2 py-1 text-xs text-accent hover:bg-accent/10 rounded-md transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  添加
+                </button>
+              </div>
+
+              {(config?.agents || []).map((agent: any, idx: number) => (
+                <div key={agent.id} className="border border-border rounded-lg p-3 space-y-2">
+                  <div className="flex items-center gap-2">
                     <input
-                      type="text"
-                      defaultValue={tool}
-                      className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md"
-                      onBlur={(e) => {
-                        const newTools = [...(config?.tools || [])];
-                        newTools[index] = e.target.value;
-                        handleConfigChange('tools', newTools);
-                      }}
+                      defaultValue={agent.name}
+                      onBlur={(e) => updateSubAgent(idx, { name: e.target.value })}
+                      className="flex-1 px-2 py-1.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent"
                     />
                     <button
-                      onClick={() => {
-                        const newTools = (config?.tools || []).filter((_tool: string, i: number) => i !== index);
-                        handleConfigChange('tools', newTools);
-                      }}
+                      onClick={() => removeSubAgent(idx)}
                       className="p-1.5 text-text-tertiary hover:text-red-500 transition-colors"
                     >
                       <Trash className="w-4 h-4" />
                     </button>
                   </div>
-                ))}
-              </div>
-              <button
-                onClick={() => {
-                  const newTools = [...(config?.tools || []), 'web-search'];
-                  handleConfigChange('tools', newTools);
-                }}
-                className="w-full mt-2 flex items-center justify-center gap-1 py-2 text-xs text-accent hover:bg-accent/10 rounded-md transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                添加工具
-              </button>
+
+                  <select
+                    defaultValue={agent.model}
+                    onChange={(e) => updateSubAgent(idx, { model: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white"
+                  >
+                    {getAvailableModels().map((m) => (
+                      <option key={m}>{m}</option>
+                    ))}
+                  </select>
+
+                  <textarea
+                    defaultValue={agent.systemPrompt}
+                    rows={3}
+                    placeholder="系统提示词"
+                    onBlur={(e) => updateSubAgent(idx, { systemPrompt: e.target.value })}
+                    className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent resize-none"
+                  />
+
+                  <input
+                    defaultValue={agent.inputVariable || ''}
+                    placeholder="输入变量（可选，留空则用全部上下文）"
+                    onBlur={(e) =>
+                      updateSubAgent(idx, { inputVariable: e.target.value || undefined })
+                    }
+                    className="w-full px-2 py-1.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent"
+                  />
+
+                  <div>
+                    <label className="block text-xs text-text-tertiary mb-1">MCP 工具（来自已配置服务器）</label>
+                    {availableTools.length === 0 ? (
+                      <p className="text-xs text-text-tertiary">尚未配置 MCP 工具，请到「系统设置 → MCP 服务器」添加后在此勾选。</p>
+                    ) : (
+                      <div className="flex flex-wrap gap-1.5">
+                        {availableTools.map((t) => (
+                          <button
+                            key={`${t.server}-${t.name}`}
+                            title={`${t.server} · ${t.desc}`}
+                            onClick={() => toggleTool(idx, t.name)}
+                            className={cn(
+                              'px-2 py-1 text-xs rounded-full transition-colors',
+                              (agent.tools || []).includes(t.name)
+                                ? 'bg-accent text-white'
+                                : 'bg-bg-secondary text-text-secondary hover:bg-accent/10',
+                            )}
+                          >
+                            {t.server}:{t.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </div>
         );

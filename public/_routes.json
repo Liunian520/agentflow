@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "include": ["/*"],
+  "exclude": [
+    "/assets/*",
+    "/favicon.svg",
+    "/_routes.json",
+    "/index.html"
+  ]
+}

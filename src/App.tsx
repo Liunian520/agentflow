@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useEffect, useRef } from 'react';
 import { Layout } from './components/layout/Layout';
 import { DashboardPage } from './pages/DashboardPage';
 import { WorkflowsPage } from './pages/WorkflowsPage';
@@ -7,9 +8,46 @@ import { AgentsPage } from './pages/AgentsPage';
 import { MarketplacePage } from './pages/MarketplacePage';
 import { SettingsPage } from './pages/SettingsPage';
 import { HostsPage } from './pages/HostsPage';
+import { ChatWorkspacePage } from './pages/ChatWorkspacePage';
 import { LoginPage } from './pages/LoginPage';
 import { useStore } from './store/useStore';
+import { connectMcpServer } from './api/llmApi';
 import type { JSX } from 'react';
+
+// 应用启动时静默重连已启用的 MCP 服务器：后端会话存于内存，刷新/冷启动后会丢失，
+// 必须重新握手，否则工具执行会静默失败。
+function useMcpAutoReconnect() {
+  const ran = useRef(false);
+  useEffect(() => {
+    if (ran.current) return;
+    ran.current = true;
+    const mcps = useStore.getState().mcps || [];
+    mcps
+      .filter((m) => m.enabled)
+      .forEach(async (server) => {
+        const res = await connectMcpServer({
+          id: server.id,
+          name: server.name,
+          transport: server.transport,
+          url: server.url,
+          headers: server.headers,
+          enabled: server.enabled,
+        });
+        if (res.success) {
+          useStore.getState().updateMCP(server.id, {
+            status: 'connected',
+            tools: res.tools || [],
+            lastError: undefined,
+          });
+        } else {
+          useStore.getState().updateMCP(server.id, {
+            status: 'error',
+            lastError: res.error,
+          });
+        }
+      });
+  }, []);
+}
 
 function RequireAuth({ children }: { children: JSX.Element }) {
   const currentUser = useStore((s) => s.currentUser);
@@ -23,6 +61,7 @@ function RequireAuth({ children }: { children: JSX.Element }) {
 }
 
 function App() {
+  useMcpAutoReconnect();
   return (
     <BrowserRouter>
       <Routes>
@@ -34,7 +73,9 @@ function App() {
             </RequireAuth>
           }
         >
-          <Route path="/" element={<DashboardPage />} />
+          <Route path="/" element={<Navigate to="/workspace" replace />} />
+          <Route path="/workspace" element={<ChatWorkspacePage />} />
+          <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />
           <Route path="/workflow/:id" element={<WorkflowEditorPage />} />
           <Route path="/agents" element={<AgentsPage />} />

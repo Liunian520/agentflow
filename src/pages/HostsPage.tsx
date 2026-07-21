@@ -18,9 +18,11 @@ import {
   Check,
   Terminal,
   Info,
+  ShieldAlert,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn } from '../lib/utils';
+import { getSecurityWarning } from '../lib/cryptoUtils';
 import type { RemoteHost } from '../types';
 import { sshApi } from '../api/sshApi';
 
@@ -552,6 +554,12 @@ export function HostsPage() {
               ) : (
                 <div>
                   <label className="block text-sm font-medium text-text-primary mb-1.5">私钥内容</label>
+                  {getSecurityWarning() && (
+                    <div className="mb-2 flex items-start gap-2 p-2.5 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                      <ShieldAlert className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                      <span>{getSecurityWarning()}</span>
+                    </div>
+                  )}
                   <textarea
                     value={form.privateKey}
                     onChange={(e) => setForm({ ...form, privateKey: e.target.value })}
@@ -559,6 +567,7 @@ export function HostsPage() {
                     rows={6}
                     className="w-full px-3 py-2 text-sm font-mono border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent resize-none"
                   />
+                  <p className="mt-1 text-xs text-text-tertiary">私钥将通过 AES-GCM 加密后传输，不会以明文发送到后端。</p>
                 </div>
               )}
 
