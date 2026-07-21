@@ -99,11 +99,11 @@ export class SSHService {
         let stdout = '';
         let stderr = '';
 
-        stream.on('data', (data) => {
+        stream.on('data', (data: Buffer) => {
           stdout += data.toString();
         });
 
-        stream.stderr.on('data', (data) => {
+        stream.stderr.on('data', (data: Buffer) => {
           stderr += data.toString();
         });
 

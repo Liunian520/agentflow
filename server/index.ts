@@ -17,6 +17,7 @@ const allowedOrigins = [
   'https://agentflow.pages.dev',
   'https://agentflow.vercel.app',
   'https://agentflow.netlify.app',
+  'https://agent.lnyun.site',
 ];
 
 app.use(cors({
