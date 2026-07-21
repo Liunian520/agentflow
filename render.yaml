@@ -3,7 +3,7 @@ services:
     name: agentflow-server
     runtime: node
     plan: free
-    buildCommand: npm install && npx tsc --project tsconfig.server.json
+    buildCommand: npm install && npx tsc --project tsconfig.server.json && echo '{"type":"commonjs"}' > dist-server/package.json
     startCommand: node dist-server/index.js
     envVars:
       - key: NODE_ENV
