@@ -30,6 +30,7 @@ function useMcpAutoReconnect() {
           name: server.name,
           transport: server.transport,
           url: server.url,
+          fsDir: server.fsDir,
           headers: server.headers,
           enabled: server.enabled,
         });

@@ -94,8 +94,9 @@ export interface MCPTool {
 export interface MCPServer {
   id: string;
   name: string;
-  transport: 'streamable-http' | 'sse';
-  url: string;
+  transport: 'streamable-http' | 'sse' | 'local-fs';
+  url?: string;
+  fsDir?: string;           // local-fs 模式：暴露给 AI 的服务器目录绝对路径
   headers?: Record<string, string>;
   enabled: boolean;
   status: 'connected' | 'disconnected' | 'error';

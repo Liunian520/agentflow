@@ -70,12 +70,13 @@ function createInitialForm(): ChannelForm {
   };
 }
 
-type McpTransport = 'streamable-http' | 'sse';
+type McpTransport = 'streamable-http' | 'sse' | 'local-fs';
 
 interface McpForm {
   name: string;
   transport: McpTransport;
   url: string;
+  fsDir?: string; // local-fs 模式：服务器目录绝对路径
   headers: string; // "Key: Value" 每行一个
   enabled: boolean;
 }
@@ -240,7 +241,8 @@ export function SettingsPage() {
     setMcpForm({
       name: server.name,
       transport: server.transport,
-      url: server.url,
+      url: server.url || '',
+      fsDir: server.fsDir || '',
       headers: server.headers
         ? Object.entries(server.headers)
             .map(([k, v]) => `${k}: ${v}`)
@@ -256,17 +258,26 @@ export function SettingsPage() {
       showToast('请输入服务器名称');
       return;
     }
-    if (!mcpForm.url.trim()) {
+    if (mcpForm.transport === 'local-fs') {
+      if (!mcpForm.fsDir?.trim()) {
+        showToast('请输入要暴露给 AI 的目录路径');
+        return;
+      }
+    } else if (!mcpForm.url.trim()) {
       showToast('请输入服务器地址');
       return;
     }
-    const payload = {
+    const payload: any = {
       name: mcpForm.name.trim(),
       transport: mcpForm.transport,
-      url: mcpForm.url.trim(),
-      headers: parseHeaders(mcpForm.headers),
       enabled: mcpForm.enabled,
     };
+    if (mcpForm.transport === 'local-fs') {
+      payload.fsDir = mcpForm.fsDir!.trim();
+    } else {
+      payload.url = mcpForm.url.trim();
+      payload.headers = parseHeaders(mcpForm.headers);
+    }
     if (mcpEditingId) {
       updateMCP(mcpEditingId, payload);
       showToast('MCP 服务器已更新');
@@ -290,6 +301,7 @@ export function SettingsPage() {
         name: server.name,
         transport: server.transport,
         url: server.url,
+        fsDir: server.fsDir,
         headers: server.headers,
         enabled: server.enabled,
       });
@@ -646,7 +658,7 @@ export function SettingsPage() {
                             </div>
                             <div className="text-xs text-text-tertiary mt-0.5 flex items-center gap-1">
                               <span className="px-1 py-0.5 bg-bg-secondary rounded border border-border">
-                                {server.transport === 'sse' ? 'SSE' : 'Streamable HTTP'}
+                                {server.transport === 'sse' ? 'SSE' : server.transport === 'local-fs' ? '本地文件系统' : 'Streamable HTTP'}
                               </span>
                               <span>{toolCount} 个工具</span>
                             </div>
@@ -996,41 +1008,62 @@ export function SettingsPage() {
                   >
                     <option value="streamable-http">Streamable HTTP</option>
                     <option value="sse">SSE</option>
+                    <option value="local-fs">本地文件系统（服务器目录）</option>
                   </select>
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
                 </div>
               </div>
 
-              {/* URL */}
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">
-                  服务器地址 <span className="text-red-500">*</span>
-                </label>
-                <div className="relative">
-                  <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
+              {/* URL / 目录路径（按传输协议切换） */}
+              {mcpForm.transport === 'local-fs' ? (
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">
+                    目录路径 <span className="text-red-500">*</span>
+                  </label>
                   <input
                     type="text"
-                    value={mcpForm.url}
-                    onChange={(e) => setMcpForm((prev) => ({ ...prev, url: e.target.value }))}
-                    placeholder="https://example.com/mcp"
-                    className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
+                    value={mcpForm.fsDir || ''}
+                    onChange={(e) => setMcpForm((prev) => ({ ...prev, fsDir: e.target.value }))}
+                    placeholder="/home/user/project 或 C:\\projects\\myapp"
+                    className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
+                  />
+                  <p className="text-xs text-text-tertiary mt-1.5">
+                    该目录位于 AgentFlow 后端服务器上，连接后 AI 将能直接读写其中的文件。
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">
+                    服务器地址 <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
+                    <input
+                      type="text"
+                      value={mcpForm.url}
+                      onChange={(e) => setMcpForm((prev) => ({ ...prev, url: e.target.value }))}
+                      placeholder="https://example.com/mcp"
+                      className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Headers（仅 HTTP/SSE） */}
+              {mcpForm.transport !== 'local-fs' && (
+                <div>
+                  <label className="block text-sm font-medium text-text-primary mb-1.5">
+                    Header 认证 <span className="text-xs text-text-tertiary font-normal">（每行一个，格式 Key: Value）</span>
+                  </label>
+                  <textarea
+                    value={mcpForm.headers}
+                    onChange={(e) => setMcpForm((prev) => ({ ...prev, headers: e.target.value }))}
+                    placeholder={'Authorization: Bearer xxx\nX-Api-Key: yyy'}
+                    rows={3}
+                    className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent resize-none font-mono text-xs"
                   />
                 </div>
-              </div>
-
-              {/* Headers */}
-              <div>
-                <label className="block text-sm font-medium text-text-primary mb-1.5">
-                  Header 认证 <span className="text-xs text-text-tertiary font-normal">（每行一个，格式 Key: Value）</span>
-                </label>
-                <textarea
-                  value={mcpForm.headers}
-                  onChange={(e) => setMcpForm((prev) => ({ ...prev, headers: e.target.value }))}
-                  placeholder={'Authorization: Bearer xxx\nX-Api-Key: yyy'}
-                  rows={3}
-                  className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent resize-none font-mono text-xs"
-                />
-              </div>
+              )}
 
               {/* Enabled toggle */}
               <div className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">

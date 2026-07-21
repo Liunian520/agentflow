@@ -1,11 +1,14 @@
 /**
- * MCP 客户端服务 — 纯 fetch 实现的 MCP Streamable HTTP / SSE 客户端
- * 不依赖 @modelcontextprotocol/sdk，避免为浏览器打包引入后端专用依赖
- * 通过 JSON-RPC 2.0 与 MCP 服务器通信：initialize / tools/list / tools/call
+ * MCP 客户端服务
+ * - HTTP/SSE 传输：纯 fetch 实现的 MCP Streamable HTTP / SSE 客户端（不依赖 SDK，避免浏览器打包引入后端依赖）
+ * - local-fs 传输：在后端本地 spawn stdio 型 MCP server（如 @modelcontextprotocol/server-filesystem <dir>），
+ *   通过子进程 stdin/stdout 做 JSON-RPC，让对话式 AI 能直接读写"服务器上的某个目录"
+ * 统一通过 JSON-RPC 2.0 与 MCP 服务器通信：initialize / tools/list / tools/call
  */
 
 import type { Request, Response } from 'express';
 import express from 'express';
+import { spawn } from 'child_process';
 
 export interface McpTool {
   name: string;
@@ -16,8 +19,9 @@ export interface McpTool {
 export interface McpServerConfig {
   id: string;
   name: string;
-  transport: 'streamable-http' | 'sse';
-  url: string;
+  transport: 'streamable-http' | 'sse' | 'local-fs';
+  url?: string;            // streamable-http / sse 使用
+  fsDir?: string;          // local-fs 使用：要暴露给 AI 的目录绝对路径
   headers?: Record<string, string>;
 }
 
@@ -26,6 +30,10 @@ interface McpSession {
   sessionId?: string;
   tools: McpTool[];
   protocolVersion: string;
+  // local-fs 专用
+  child?: any;
+  pending?: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>;
+  stdioBuf?: string;
 }
 
 // 运行时内存会话注册表（按 server id 索引）
@@ -33,6 +41,7 @@ const sessions = new Map<string, McpSession>();
 
 const PROTOCOL_VERSION = '2024-11-05';
 
+// ===== HTTP / SSE 传输（fetch 实现） =====
 // 单次 JSON-RPC 调用，兼容 application/json 与 text/event-stream（SSE）响应
 async function rpc(session: McpSession, method: string, params: any, notify = false): Promise<any> {
   const headers: Record<string, string> = {
@@ -42,7 +51,7 @@ async function rpc(session: McpSession, method: string, params: any, notify = fa
   };
   if (session.sessionId) headers['Mcp-Session-Id'] = session.sessionId;
 
-  const res = await fetch(session.config.url, {
+  const res = await fetch(session.config.url!, {
     method: 'POST',
     headers,
     body: JSON.stringify({ jsonrpc: '2.0', id: notify ? undefined : Date.now(), method, params }),
@@ -82,8 +91,97 @@ async function rpc(session: McpSession, method: string, params: any, notify = fa
   }
 }
 
-// 连接 MCP 服务器并完成握手，返回工具清单
+// ===== local-fs 传输（stdio 子进程） =====
+function createStdioSession(config: McpServerConfig): McpSession {
+  const child = spawn(
+    'npx',
+    ['-y', '@modelcontextprotocol/server-filesystem', config.fsDir || process.cwd()],
+    { stdio: ['pipe', 'pipe', 'pipe'], env: process.env },
+  );
+  const session: McpSession = {
+    config,
+    tools: [],
+    protocolVersion: PROTOCOL_VERSION,
+    child,
+    pending: new Map(),
+    stdioBuf: '',
+  };
+
+  child.stdout?.on('data', (chunk: Buffer) => {
+    session.stdioBuf = (session.stdioBuf || '') + chunk.toString();
+    let idx: number;
+    while ((idx = session.stdioBuf.indexOf('\n')) >= 0) {
+      const line = session.stdioBuf.slice(0, idx).trim();
+      session.stdioBuf = session.stdioBuf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        const msg = JSON.parse(line);
+        const id = msg.id;
+        if (id !== undefined && id !== null && session.pending?.has(id)) {
+          const p = session.pending.get(id)!;
+          session.pending!.delete(id);
+          if (msg.error) p.reject(new Error(msg.error.message || 'MCP stdio error'));
+          else p.resolve(msg.result);
+        }
+      } catch {
+        // 忽略无法解析的非 JSON 行
+      }
+    }
+  });
+  child.stderr?.on('data', () => {
+    /* 静默忽略子进程日志 */
+  });
+  child.on('exit', () => {
+    session.pending?.forEach((p) => p.reject(new Error('MCP stdio 进程已退出')));
+    session.pending?.clear();
+  });
+
+  return session;
+}
+
+let stdioReqId = 1;
+function stdioRpc(session: McpSession, method: string, params: any, notify = false): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const id = notify ? undefined : stdioReqId++;
+    if (!notify && id !== undefined) session.pending?.set(id, { resolve, reject });
+    session.child?.stdin?.write(
+      JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n',
+    );
+    if (notify) resolve(undefined);
+  });
+}
+
+// ===== 连接入口 =====
 export async function connectMcp(config: McpServerConfig): Promise<{ tools: McpTool[] }> {
+  // —— local-fs：spawn 本地 stdio filesystem server ——
+  if (config.transport === 'local-fs') {
+    // 同一 id 已存在则先回收旧子进程
+    const old = sessions.get(config.id);
+    if (old?.child) {
+      try { old.child.kill(); } catch { /* noop */ }
+    }
+
+    const session = createStdioSession(config);
+    await stdioRpc(session, 'initialize', {
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: {},
+      clientInfo: { name: 'AgentFlow', version: '1.0.0' },
+    });
+    await stdioRpc(session, 'notifications/initialized', {}, true).catch(() => {});
+
+    const list = await stdioRpc(session, 'tools/list', {});
+    const tools: McpTool[] = (list?.tools || []).map((t: any) => ({
+      name: t.name,
+      description: t.description || '',
+      inputSchema: t.inputSchema || { type: 'object', properties: {} },
+    }));
+
+    session.tools = tools;
+    sessions.set(config.id, session);
+    return { tools };
+  }
+
+  // —— streamable-http / sse ——
   const session: McpSession = { config, tools: [], protocolVersion: PROTOCOL_VERSION };
 
   await rpc(session, 'initialize', {
@@ -111,11 +209,18 @@ export function getSession(id: string): McpSession | undefined {
   return sessions.get(id);
 }
 
-// 调用指定服务器上的工具
+// 调用指定服务器上的工具（按 transport 分支）
 export async function callMcpTool(serverId: string, name: string, args: any): Promise<{ content: string }> {
   const session = sessions.get(serverId);
   if (!session) throw new Error('MCP 服务器未连接，请先连接');
-  const result = await rpc(session, 'tools/call', { name, arguments: args });
+
+  let result: any;
+  if (session.config.transport === 'local-fs') {
+    result = await stdioRpc(session, 'tools/call', { name, arguments: args || {} });
+  } else {
+    result = await rpc(session, 'tools/call', { name, arguments: args || {} });
+  }
+
   const text = (result?.content || [])
     .map((c: any) => (c.type === 'text' ? c.text : JSON.stringify(c)))
     .join('\n');
@@ -142,8 +247,15 @@ export function registerMcpRoutes(router: express.Router): void {
   router.post('/mcp/connect', async (req: Request, res: Response) => {
     try {
       const cfg = req.body as McpServerConfig;
-      if (!cfg.id || !cfg.url) {
-        return res.status(400).json({ success: false, error: '缺少 id 或 url' });
+      if (!cfg.id) {
+        return res.status(400).json({ success: false, error: '缺少 id' });
+      }
+      if (cfg.transport === 'local-fs') {
+        if (!cfg.fsDir) {
+          return res.status(400).json({ success: false, error: 'local-fs 模式缺少 fsDir（目录路径）' });
+        }
+      } else if (!cfg.url) {
+        return res.status(400).json({ success: false, error: '缺少 url' });
       }
       const { tools } = await connectMcp(cfg);
       res.json({ success: true, tools });

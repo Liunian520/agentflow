@@ -26,6 +26,7 @@ import { ThinkingIndicator, generateThinkingSteps } from '../components/chat/Thi
 import { ApprovalPrompt, needsApproval } from '../components/chat/ApprovalPrompt';
 import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
 import { chatLLMStreamEnhanced, getAvailableChannelFromStore } from '../api/llmApi';
+import { ProjectDirPanel, type FileNode, type FileChange } from '../components/chat/ProjectDirPanel';
 
 // 预置快捷建议
 const quickSuggestions = [
@@ -165,6 +166,138 @@ export function ChatWorkspacePage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // ===== 本机项目目录（A 路线：对话 AI 操作项目目录） =====
+  const [projectDir, setProjectDir] = useState<{ handle: any; name: string } | null>(null);
+  const [fileTree, setFileTree] = useState<FileNode[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
+  const [dirBusy, setDirBusy] = useState(false);
+  const [dirError, setDirError] = useState<string | null>(null);
+  const [pendingChanges, setPendingChanges] = useState<FileChange[]>([]);
+  const streamContentRef = useRef('');
+  // 用 ref 持有最新的 handleLLMStream，避免 processUserInput 因声明顺序/依赖问题拿到过期闭包
+  const handleLLMStreamRef = useRef<((text: string, intent: ParsedIntent, userMsg: ChatMessage) => void) | null>(null);
+
+  const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'coverage', 'out', '.idea', '.vscode']);
+  const MAX_FILES = 300;
+
+  const buildFileTree = async (
+    handle: any,
+    relPath = '',
+    depth = 0,
+    budget: { n: number } = { n: 0 },
+  ): Promise<FileNode[]> => {
+    if (depth > 5) return [];
+    const nodes: FileNode[] = [];
+    try {
+      for await (const [name, entry] of (handle as any).entries()) {
+        if (name.startsWith('.')) continue;
+        if (entry.kind === 'directory') {
+          if (IGNORE_DIRS.has(name)) continue;
+          const children = depth < 3 ? await buildFileTree(entry, relPath ? `${relPath}/${name}` : name, depth + 1, budget) : [];
+          nodes.push({ name, path: relPath ? `${relPath}/${name}` : name, isDir: true, children });
+        } else {
+          if (budget.n >= MAX_FILES) continue;
+          budget.n += 1;
+          nodes.push({ name, path: relPath ? `${relPath}/${name}` : name, isDir: false });
+        }
+      }
+    } catch {
+      /* 忽略无权限目录 */
+    }
+    nodes.sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+    return nodes;
+  };
+
+  const resolveFileHandle = async (dir: any, relPath: string): Promise<any> => {
+    const segs = relPath.split('/').filter(Boolean);
+    let cur = dir;
+    for (let i = 0; i < segs.length - 1; i++) {
+      cur = await cur.getDirectoryHandle(segs[i], { create: true });
+    }
+    return cur.getFileHandle(segs[segs.length - 1], { create: true });
+  };
+
+  const selectProjectDir = async () => {
+    try {
+      setDirBusy(true);
+      setDirError(null);
+      const handle = await (window as any).showDirectoryPicker();
+      try {
+        await handle.requestPermission?.({ mode: 'readwrite' });
+      } catch {
+        /* 已授权则忽略 */
+      }
+      const tree = await buildFileTree(handle, '', 0, { n: 0 });
+      setProjectDir({ handle, name: handle.name });
+      setFileTree(tree);
+      setSelectedFiles(new Set());
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') setDirError(e?.message || '选择目录失败');
+    } finally {
+      setDirBusy(false);
+    }
+  };
+
+  const toggleFile = (path: string) => {
+    setSelectedFiles((prev) => {
+      const n = new Set(prev);
+      if (n.has(path)) n.delete(path);
+      else n.add(path);
+      return n;
+    });
+  };
+
+  const readSelectedContext = async (): Promise<string> => {
+    if (!projectDir || selectedFiles.size === 0) return '';
+    const parts: string[] = [];
+    for (const path of selectedFiles) {
+      try {
+        const fileHandle = await resolveFileHandle(projectDir.handle, path);
+        const file = await fileHandle.getFile();
+        const content = await file.text();
+        const ext = path.split('.').pop() || '';
+        parts.push(`// 文件: ${path}\n\`\`\`${ext}\n${content}\n\`\`\``);
+      } catch {
+        /* 跳过无法读取的文件 */
+      }
+    }
+    return parts.join('\n\n');
+  };
+
+  // 从 AI 回复中提取文件改动：```语言名:相对路径 ... ```
+  const extractChanges = (text: string): FileChange[] => {
+    const re = /```[\w-]*:\s*([^\n]+)\n([\s\S]*?)```/g;
+    const out: FileChange[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const path = m[1].trim();
+      const content = m[2];
+      if (path && !out.find((c) => c.path === path)) {
+        out.push({ path, content, status: 'pending' });
+      }
+    }
+    return out;
+  };
+
+  const applyChange = async (c: FileChange) => {
+    if (!projectDir) return;
+    try {
+      const fileHandle = await resolveFileHandle(projectDir.handle, c.path);
+      const writable = await fileHandle.createWritable();
+      await writable.write(c.content);
+      await writable.close();
+      setPendingChanges((prev) => prev.map((x) => (x.path === c.path ? { ...x, status: 'applied' } : x)));
+    } catch (e: any) {
+      setDirError(e?.message || '写回失败');
+    }
+  };
+
+  const skipChange = (c: FileChange) => {
+    setPendingChanges((prev) => prev.map((x) => (x.path === c.path ? { ...x, status: 'skipped' } : x)));
+  };
+
+  const clearChanges = () => setPendingChanges([]);
 
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const activeMessages = activeSession?.messages || [];
@@ -317,7 +450,7 @@ export function ChatWorkspacePage() {
 
     // 7. 无需确认：判断是否走 LLM 流式对话（纯对话/低置信度）
     if (intent.action === 'general_chat' || intent.confidence < 0.5) {
-      handleLLMStream(text.trim(), intent, userMsg);
+      handleLLMStreamRef.current?.(text.trim(), intent, userMsg);
       return;
     }
 
@@ -644,6 +777,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
   const streamAbortRef = useRef<AbortController | null>(null);
 
   const handleLLMStream = useCallback(async (text: string, intent: ParsedIntent, userMsg: ChatMessage) => {
+    streamContentRef.current = '';
     const channelInfo = await getAvailableChannelFromStore();
 
     if (!channelInfo) {
@@ -696,6 +830,12 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 
 请根据用户的问题给出专业、简洁的回答。如需创建/修改对象，建议用户使用斜杠命令或更明确的指令。`;
 
+    // 注入本机项目目录上下文（A 路线）
+    const projectContext = await readSelectedContext();
+    const contextMsg = projectContext
+      ? `【当前项目目录：${projectDir?.name}】以下是用户选中的项目文件，你可以阅读它们来理解项目结构。\n当用户需要新增或修改文件时，请用如下格式输出完整文件内容（语言名可选，冒号后是相对路径），用户确认后会自动写回对应文件：\n\`\`\`语言名:相对路径\n...完整文件内容...\n\`\`\`\n\n项目文件内容：\n${projectContext}`
+      : null;
+
     // 工具调用日志（在流式过程中累计，最终回复前展示）
     const toolLog = { text: '' };
 
@@ -707,14 +847,15 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
         baseUrl: channelInfo.baseUrl,
         apiKey: channelInfo.apiKey,
         model: channelInfo.models[0]?.name || 'gpt-4o',
-        messages: [
-          { role: 'system', content: systemPrompt },
+        messages: ([
+          { role: 'system' as const, content: systemPrompt },
+          ...(contextMsg ? [{ role: 'system' as const, content: contextMsg }] : []),
           ...activeMessages.slice(-6).map(m => ({
-            role: m.role as 'user' | 'assistant',
+            role: (m.role === 'system' || m.role === 'tool' ? 'assistant' : m.role) as 'user' | 'assistant' | 'system' | 'tool',
             content: m.content,
           })),
-          { role: 'user', content: text },
-        ],
+          { role: 'user' as const, content: text },
+        ]) as Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }>,
         temperature: activeMode === 'debug' ? 0.3 : 0.7,
         maxTokens: 2048,
       },
@@ -740,6 +881,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
           }));
         },
         onDelta: (data) => {
+          streamContentRef.current = data.fullContent || '';
           // 实时更新占位消息内容（保留工具调用日志前缀）
           const prefix = toolLog.text ? toolLog.text + '\n\n' : '';
           const currentContent = prefix + (data.fullContent || '');
@@ -758,6 +900,17 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
           setThinkingSteps([]);
           setActiveTaskSteps([]);
           streamAbortRef.current = null;
+          // 从 AI 回复中提取文件改动（A 路线：本机目录写回）
+          if (projectDir && streamContentRef.current) {
+            const extracted = extractChanges(streamContentRef.current);
+            if (extracted.length > 0) {
+              setPendingChanges((prev) => [
+                ...prev,
+                ...extracted.filter((e) => !prev.find((p) => p.path === e.path)),
+              ]);
+            }
+          }
+          streamContentRef.current = '';
         },
         onError: (data) => {
           // 流式出错，更新占位消息为错误信息
@@ -781,7 +934,9 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     );
 
     streamAbortRef.current = abortController;
-  }, [activeMessages, activeSessionId, activeMode]);
+  }, [activeMessages, activeSessionId, activeMode, projectDir, selectedFiles]);
+
+  handleLLMStreamRef.current = handleLLMStream;
 
   const executeAndRespond = useCallback((intent: ParsedIntent, userMsg: ChatMessage, initialSteps: TaskStep[]) => {
     // 模拟分步执行
@@ -1158,6 +1313,21 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 
         {/* 消息区 */}
         <div className="flex-1 overflow-y-auto px-4 py-4 md:px-8 md:py-6">
+          {/* 本机项目目录面板（A 路线：对话 AI 操作项目目录） */}
+          <ProjectDirPanel
+            projectName={projectDir?.name || null}
+            fileTree={fileTree}
+            selected={selectedFiles}
+            dirBusy={dirBusy}
+            dirError={dirError}
+            changes={pendingChanges}
+            onSelectDir={selectProjectDir}
+            onToggleFile={toggleFile}
+            onApplyChange={applyChange}
+            onSkipChange={skipChange}
+            onClearChanges={clearChanges}
+          />
+
           <div className="max-w-3xl mx-auto space-y-4">
             {/* 首次欢迎区 */}
             {activeMessages.length <= 1 && !isProcessing && !pendingApproval && (

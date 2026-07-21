@@ -322,8 +322,9 @@ export async function getChannelForModel(modelName: string): Promise<{
 export interface McpServerInput {
   id: string;
   name: string;
-  transport: 'streamable-http' | 'sse';
-  url: string;
+  transport: 'streamable-http' | 'sse' | 'local-fs';
+  url?: string;
+  fsDir?: string;
   headers?: Record<string, string>;
   enabled: boolean;
 }
