@@ -10,9 +10,10 @@
  */
 
 import type { MetaSkill, ExecutionTrace } from '../types';
-import { chatLLM, getAvailableChannelFromStore } from '../api/llmApi';
+import { getAvailableChannelFromStore, routedChatLLM } from '../api/llmApi';
 import { buildMetaAgentSystemPrompt, mergeMetaSkillUpdate } from './metaSkill';
 import { findFailureTraces, clusterFailureModes, buildReflectionContext } from './experienceBank';
+import { extractTaskFeatures } from './modelRouter';
 
 // 反思触发阈值：累积失败达到此数量才触发（避免单次失败就浪费 LLM 调用）
 const FAILURE_TRIGGER_THRESHOLD = 3;
@@ -118,19 +119,14 @@ async function reflectAndEvolve(params: {
   );
 
   try {
-    const result = await chatLLM({
-      channelId: channelInfo.channelId,
-      provider: channelInfo.provider as any,
-      baseUrl: channelInfo.baseUrl,
-      apiKey: channelInfo.apiKey,
-      model: channelInfo.models[0]?.name || 'gpt-4o',
+    const result = await routedChatLLM({
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent },
       ],
       temperature: 0.4,
       maxTokens: 1500,
-    });
+    }, extractTaskFeatures(userContent, { intent: 'reflection' }));
 
     if (!result.success || !result.content) {
       return { newSkill: params.currentSkill, summary: '反思调用失败，策略未变更。' };

@@ -17,6 +17,10 @@ import { shouldUseMetaAgent, metaAgentOrchestrate, executeOrchestrationPlan } fr
 import { recordExecutionTrace, findRelevantExperience, buildExperienceContext } from '../lib/experienceBank';
 import { runReflection } from '../lib/metaSkillEvolver';
 import { rolloutMultiplePlans, evaluatePlansQuality } from '../lib/multiTrajectoryRollout';
+import { extractTaskFeatures } from '../lib/modelRouter';
+import { designWorkflowFromDescription, modifyWorkflowWithDescription, applyWorkflowModification } from '../lib/llmWorkflowDesigner';
+import { getMemoryManager } from '../lib/memory';
+import { MEMORY_TOOL_SCHEMAS, executeMemoryTool } from '../lib/memory/selfEditing';
 import { AgentCard } from '../components/chat/cards/AgentCard';
 import { WorkflowPreview } from '../components/chat/cards/WorkflowPreview';
 import { Clarification } from '../components/chat/cards/Clarification';
@@ -26,8 +30,9 @@ import { TaskTracker, generateTaskSteps } from '../components/chat/TaskTracker';
 import { ThinkingIndicator, generateThinkingSteps } from '../components/chat/ThinkingIndicator';
 import { ApprovalPrompt, needsApproval } from '../components/chat/ApprovalPrompt';
 import { MarkdownRenderer } from '../components/chat/MarkdownRenderer';
-import { chatLLMStreamEnhanced, getAvailableChannelFromStore } from '../api/llmApi';
+import { getAvailableChannelFromStore, routedChatLLMStream } from '../api/llmApi';
 import { ProjectDirPanel, type FileNode, type FileChange } from '../components/chat/ProjectDirPanel';
+import { RouterDashboard } from '../components/chat/cards/RouterDashboard';
 
 /** 用户上传的文件，作为单次对话的上下文 */
 interface UploadedFile {
@@ -175,6 +180,7 @@ export function ChatWorkspacePage() {
 
   // 斜杠命令菜单状态
   const [showSlashMenu, setShowSlashMenu] = useState(false);
+  const [showRouterDashboard, setShowRouterDashboard] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -434,6 +440,30 @@ export function ChatWorkspacePage() {
       return;
     }
 
+    // /router：打开路由仪表盘（ACRouter 自进化统计）
+    if (cmd.id === 'router') {
+      setShowRouterDashboard(true);
+      return;
+    }
+
+    // /dream：触发 Auto Dream 四阶段跨会话记忆整合
+    if (cmd.id === 'dream') {
+      handleDreamCommand();
+      return;
+    }
+
+    // /extract：手动触发 Auto Extraction
+    if (cmd.id === 'extract') {
+      handleExtractCommand();
+      return;
+    }
+
+    // /memory：显示记忆架构统计
+    if (cmd.id === 'memory') {
+      handleMemoryStatsCommand();
+      return;
+    }
+
     const text = textMap[cmd.id] || cmd.label;
     processUserInput(text);
   };
@@ -529,7 +559,17 @@ export function ChatWorkspacePage() {
       return;
     }
 
-    // 9. 操作类意图：直接执行
+    // 9. 工作流设计/修改 → LLM 驱动（而非模板拼接）
+    if (intent.action === 'create_workflow') {
+      handleWorkflowDesign(text.trim(), userMsg);
+      return;
+    }
+    if (intent.action === 'update_workflow' || intent.action === 'add_node' || intent.action === 'configure_node') {
+      handleWorkflowModify(text.trim(), userMsg);
+      return;
+    }
+
+    // 10. 其他操作类意图：直接执行
     executeAndRespond(intent, userMsg, taskSteps);
   }, [activeMessages, activeSessionId, activeMode, isProcessing]);
 
@@ -549,6 +589,119 @@ export function ChatWorkspacePage() {
       return { ...s, messages: [...s.messages, msg], title, updatedAt: new Date().toISOString(), mode: activeMode };
     }));
   }, [activeSessionId, activeMode]);
+
+  // ===== LLM 驱动的工作流设计（对话创建） =====
+
+  const handleWorkflowDesign = useCallback(async (userText: string, userMsg: ChatMessage) => {
+    setThinkingSteps([{ id: generateId(), phase: 'analyzing', content: '正在理解你的工作流需求...', timestamp: new Date().toISOString() }]);
+    setIsProcessing(true);
+
+    try {
+      const designResult = await designWorkflowFromDescription(userText);
+
+      if (designResult.success) {
+        // 创建工作流并写入 Store
+        const workflowId = useStore.getState().createWorkflow(designResult.name);
+        useStore.getState().updateWorkflow(workflowId, {
+          description: designResult.description,
+          nodes: designResult.nodes,
+          edges: designResult.edges,
+        });
+        const workflow = useStore.getState().workflows.find(w => w.id === workflowId);
+
+        const responseText = designResult.fallback
+          ? `已为你创建工作流 **${designResult.name}**（基于模板拼接，可继续对话细化）。\n\n工作流包含 ${designResult.nodes.length} 个节点、${designResult.edges.length} 条连线。`
+          : `已为你设计并创建工作流 **${designResult.name}**！\n\n工作流包含 ${designResult.nodes.length} 个节点、${designResult.edges.length} 条连线：\n${designResult.nodes.filter(n => n.type !== 'start' && n.type !== 'end').map(n => `- **${n.name}** (${n.type})`).join('\n')}\n\n你可以继续对话细化（如"再加一个条件分支"），或在编辑器中手动调整。`;
+
+        const assistantMsg: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: responseText,
+          timestamp: new Date().toISOString(),
+          messageType: 'workflow_preview',
+          metadata: { workflowId, workflow },
+        };
+        updateSessionMessages(activeSessionId, [...activeMessages, userMsg, assistantMsg]);
+      } else {
+        appendAssistantMessage(`⚠️ 工作流设计失败：${designResult.error || '未知错误'}。请尝试更详细的描述，如"设计一个内容审核流程：接收文本→AI判断→人工复审→输出结果"。`);
+      }
+    } catch (error: any) {
+      appendAssistantMessage(`⚠️ 工作流设计异常：${error.message || '未知错误'}`);
+    } finally {
+      setIsProcessing(false);
+      setThinkingSteps([]);
+    }
+  }, [activeMessages, activeSessionId]);
+
+  // ===== LLM 驱动的工作流修改（对话追加） =====
+
+  const handleWorkflowModify = useCallback(async (userText: string, userMsg: ChatMessage) => {
+    setThinkingSteps([{ id: generateId(), phase: 'planning', content: '正在根据你的要求修改工作流...', timestamp: new Date().toISOString() }]);
+    setIsProcessing(true);
+
+    // 找到最近创建的工作流（或当前选中的）
+    const currentWfId = useStore.getState().currentWorkflowId;
+    const recentWorkflowMsg = [...activeMessages].reverse().find(m => m.messageType === 'workflow_preview' && m.metadata?.workflowId);
+    const targetWorkflowId = recentWorkflowMsg?.metadata?.workflowId || currentWfId;
+    const targetWorkflow = useStore.getState().workflows.find(w => w.id === targetWorkflowId);
+
+    if (!targetWorkflow) {
+      appendAssistantMessage('⚠️ 未找到可修改的工作流。请先创建一个工作流再进行修改。');
+      setIsProcessing(false);
+      setThinkingSteps([]);
+      return;
+    }
+
+    try {
+      const modifyResult = await modifyWorkflowWithDescription(targetWorkflow, userText);
+
+      if (modifyResult.success) {
+        const updatedWorkflow = applyWorkflowModification(targetWorkflow, modifyResult);
+        useStore.getState().updateWorkflow(targetWorkflowId, {
+          name: updatedWorkflow.name,
+          description: updatedWorkflow.description,
+          nodes: updatedWorkflow.nodes,
+          edges: updatedWorkflow.edges,
+        });
+
+        const changes = [
+          modifyResult.addedNodes.length > 0 ? `新增 ${modifyResult.addedNodes.length} 个节点` : null,
+          modifyResult.removedNodeIds.length > 0 ? `删除 ${modifyResult.removedNodeIds.length} 个节点` : null,
+          modifyResult.addedEdges.length > 0 ? `新增 ${modifyResult.addedEdges.length} 条连线` : null,
+          modifyResult.removedEdgeIds.length > 0 ? `删除 ${modifyResult.removedEdgeIds.length} 条连线` : null,
+          modifyResult.updatedNodes.length > 0 ? `更新 ${modifyResult.updatedNodes.length} 个节点` : null,
+        ].filter(Boolean).join('、');
+
+        const responseText = changes
+          ? `已修改工作流 **${updatedWorkflow.name}**：${changes}。\n\n现在共有 ${updatedWorkflow.nodes.length} 个节点、${updatedWorkflow.edges.length} 条连线。`
+          : `工作流 **${updatedWorkflow.name}** 没有变化。`;
+
+        const assistantMsg: ChatMessage = {
+          id: generateId(),
+          role: 'assistant',
+          content: responseText,
+          timestamp: new Date().toISOString(),
+          messageType: 'workflow_preview',
+          metadata: { workflowId: targetWorkflowId, workflow: updatedWorkflow },
+        };
+        updateSessionMessages(activeSessionId, [...activeMessages, userMsg, assistantMsg]);
+      } else {
+        appendAssistantMessage(`⚠️ 工作流修改失败：${modifyResult.error || 'LLM 无法解析修改指令'}。请尝试更明确的描述，如"在AI判断后加一个条件分支"。`);
+      }
+    } catch (error: any) {
+      appendAssistantMessage(`⚠️ 工作流修改异常：${error.message || '未知错误'}`);
+    } finally {
+      setIsProcessing(false);
+      setThinkingSteps([]);
+    }
+  }, [activeMessages, activeSessionId]);
+
+  // ===== 工作流细化快捷入口 =====
+  const handleWorkflowRefine = useCallback((_workflowId: string) => {
+    // 将细化提示词填入输入框，聚焦（_workflowId 保留供将来精确匹配）
+    setInputValue('继续细化这个工作流：');
+    textareaRef.current?.focus();
+  }, []);
 
   // ===== 计算 outcome 并记录轨迹到 Experience Bank =====
   const recordPlanTrace = useCallback((userInput: string, plan: OrchestrationPlan, results: ActionResult[]): 'success' | 'partial' | 'failure' => {
@@ -645,12 +798,20 @@ export function ChatWorkspacePage() {
     const relevantExp = findRelevantExperience(text, bank);
     const expContext = buildExperienceContext(relevantExp);
 
+    // Phase 10: Dynamic Recall — 从 L1/L2-A 按需召回
+    const memoryManager = getMemoryManager();
+    const { recalledContext, sessionMemoryContext } = await memoryManager.onLLMCall(activeSessionId, text, activeMessages);
+
     // 生成思考过程
     const thinking = generateThinkingSteps('smart_orchestrate', activeMode, {});
     setThinkingSteps(thinking);
 
-    // 调用 Meta-Agent 进行三层编排（经验作为结构化上下文注入）
-    const plan = await metaAgentOrchestrate(text, metaSkill, { experienceContext: expContext });
+    // 调用 Meta-Agent 进行三层编排（经验 + Dynamic Recall 注入）
+    const plan = await metaAgentOrchestrate(text, metaSkill, {
+      experienceContext: expContext,
+      recalledMemoryContext: recalledContext,
+      sessionMemoryContext: sessionMemoryContext,
+    });
 
     // Plan 模式：只展示编排方案，不执行、不记录轨迹
     if (activeMode === 'plan') {
@@ -695,6 +856,45 @@ ${plan.workflow
   }, [activeMessages, activeSessionId, activeMode, finalizeMetaPlan]);
 
   // ===== /reflect 手动触发反思进化（Phase 3） =====
+  // ===== /dream 记忆整合命令（Phase 10 Auto Dream） =====
+  const handleDreamCommand = useCallback(async () => {
+    const { handleDreamCommand: dreamCmd } = await import('../lib/memory/autoDream');
+    const result = await dreamCmd();
+    appendAssistantMessage(
+      `🌙 **Auto Dream 记忆整合**\n\n${result.message}\n\n` +
+      (result.log ? `合并: ${result.log.changes.factualMerged}条 | 蒸馏: ${result.log.changes.tracesConsolidated}条 | 修剪: ${result.log.changes.factualPruned}条 | Reflection: ${result.log.changes.reflectionsMerged}条` : '')
+    );
+  }, [appendAssistantMessage]);
+
+  // ===== /extract 手动提取命令（Phase 10 Auto Extraction） =====
+  const handleExtractCommand = useCallback(async () => {
+    const { runAutoExtraction } = await import('../lib/memory/autoExtraction');
+    const currentMessages = sessions.find(s => s.id === activeSessionId)?.messages || [];
+    const result = await runAutoExtraction(activeSessionId, currentMessages);
+    appendAssistantMessage(
+      `💡 **Auto Extraction 手动提取**\n\n` +
+      `方法: ${result.method}\n` +
+      `提取数量: ${result.extracted.length}条\n\n` +
+      (result.extracted.length > 0
+        ? result.extracted.map(m => `- [${m.type}] ${m.content.slice(0, 80)}`).join('\n')
+        : '当前对话中没有可提取的事实')
+    );
+  }, [appendAssistantMessage, activeSessionId, sessions]);
+
+  // ===== /memory 统计命令（Phase 10 记忆架构） =====
+  const handleMemoryStatsCommand = useCallback(() => {
+    const stats = getMemoryManager().getMemoryStats();
+    appendAssistantMessage(
+      `🧠 **记忆架构统计**\n\n` +
+      `**L0 Session Memory**: ${stats.L0.sessions} 个活跃会话, 预估 ${stats.L0.totalTokens} tokens\n\n` +
+      `**L1 Factual Memory**: ${stats.L1.entries} 条事实 (${Object.entries(stats.L1.byType).map(([t, n]) => `${t}=${n}`).join(', ')}), ${(stats.L1.totalSize / 1024).toFixed(1)}KB\n\n` +
+      `**L2-A Traces**: ${stats.L2A.traces} 条轨迹 (成功=${stats.L2A.successes}, 失败=${stats.L2A.failures})\n\n` +
+      `**L2-B Reflections**: ${stats.L2B.reflections} 条经验反思\n\n` +
+      `**L2-C Strategies**: Meta-Skill v${stats.L2C.version}\n\n` +
+      `**L3 Router Memory**: ${stats.L3.records} 条路由记录`
+    );
+  }, [appendAssistantMessage]);
+
   const handleReflect = useCallback(async () => {
     const store = useStore.getState();
     const refl = await runReflection(store.experienceBank, store.metaSkill);
@@ -885,8 +1085,12 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     // 先添加占位消息到对话流
     updateSessionMessages(activeSessionId, [...activeMessages, userMsg, streamMsg]);
 
-    // 组装系统提示词
-    const systemPrompt = `你是 AgentFlow 的对话助手，支持以下能力：
+    // 组装系统提示词（Phase 10: 注入 Session Memory 固定前缀 + 自动上下文压缩）
+    const memoryManager = getMemoryManager();
+    const { sessionMemoryContext, compactedMessages } = await memoryManager.onLLMCall(activeSessionId, text, activeMessages);
+    const sessionPrefix = sessionMemoryContext ? `\n${sessionMemoryContext}\n` : '';
+
+    const systemPrompt = `${sessionPrefix}你是 AgentFlow 的对话助手，支持以下能力：
 - 创建、修改、查看 Agent（AI助手）
 - 创建、编排、运行工作流
 - 管理 SSH 远程主机连接
@@ -925,36 +1129,64 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     // 工具调用日志（在流式过程中累计，最终回复前展示）
     const toolLog = { text: '' };
 
-    // 发起 SSE 流式调用
-    const abortController = chatLLMStreamEnhanced(
+    // 发起 SSE 流式调用（ACRouter 路由：自动选最优模型 + 反馈回写）
+    // Phase 10 Self-Editing: 注入记忆管理工具，Agent 可通过 function calling 自管理 L1 记忆
+    const memoryTools = MEMORY_TOOL_SCHEMAS.map(schema => ({
+      type: 'function',
+      function: schema,
+    }));
+    // Phase 10 自动上下文压缩：如果 onLLMCall 返回了 compactedMessages，使用压缩后的消息
+    // 否则取最近 6 条（滑动窗口）
+    const effectiveMessages = compactedMessages
+      ? compactedMessages.map(m => ({
+          role: (m.role === 'system' || m.role === 'tool' ? 'assistant' : m.role) as 'user' | 'assistant' | 'system' | 'tool',
+          content: m.content,
+        }))
+      : activeMessages.slice(-6).map(m => ({
+          role: (m.role === 'system' || m.role === 'tool' ? 'assistant' : m.role) as 'user' | 'assistant' | 'system' | 'tool',
+          content: m.content,
+        }));
+
+    const abortController = routedChatLLMStream(
       {
-        channelId: channelInfo.channelId,
-        provider: channelInfo.provider as any,
-        baseUrl: channelInfo.baseUrl,
-        apiKey: channelInfo.apiKey,
-        model: channelInfo.models[0]?.name || 'gpt-4o',
         messages: ([
           { role: 'system' as const, content: systemPrompt },
           ...(contextMsg ? [{ role: 'system' as const, content: contextMsg }] : []),
-          ...activeMessages.slice(-6).map(m => ({
-            role: (m.role === 'system' || m.role === 'tool' ? 'assistant' : m.role) as 'user' | 'assistant' | 'system' | 'tool',
-            content: m.content,
-          })),
+          ...effectiveMessages,
           { role: 'user' as const, content: text },
         ]) as Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }>,
         temperature: activeMode === 'debug' ? 0.3 : activeMode === 'ask' ? 0.5 : 0.7,
         maxTokens: 2048,
+        tools: memoryTools,
       },
+      extractTaskFeatures(text, { intent: 'general_chat', mode: activeMode }),
       {
         onStart: () => {
           // 开始收到流式数据
         },
         onTool: (data) => {
-          const line =
-            data.status === 'running'
-              ? `🔧 调用工具 \`${data.name}\` …`
-              : `✅ 工具 \`${data.name}\` 完成`;
-          toolLog.text += (toolLog.text ? '\n' : '') + line;
+          // Phase 10 Self-Editing: 如果是 memory 工具，立即执行并显示结果
+          if (data.name.startsWith('memory_')) {
+            if (data.status === 'running') {
+              toolLog.text += (toolLog.text ? '\n' : '') + `🔧 调用记忆工具 \`${data.name}\` …`;
+            } else if (data.status === 'done' && data.result) {
+              // 解析并执行 memory 工具
+              try {
+                const args = JSON.parse(data.result);
+                const result = executeMemoryTool(data.name, args);
+                const resultMsg = result.success ? `✅ ${result.message}` : `❌ ${result.message}`;
+                toolLog.text += (toolLog.text ? '\n' : '') + resultMsg;
+              } catch {
+                toolLog.text += (toolLog.text ? '\n' : '') + `✅ 记忆工具 \`${data.name}\` 完成`;
+              }
+            }
+          } else {
+            const line =
+              data.status === 'running'
+                ? `🔧 调用工具 \`${data.name}\` …`
+                : `✅ 工具 \`${data.name}\` 完成`;
+            toolLog.text += (toolLog.text ? '\n' : '') + line;
+          }
           const prefix = toolLog.text ? toolLog.text + '\n\n' : '';
           setSessions((prev) => prev.map((s) => {
             if (s.id !== activeSessionId) return s;
@@ -997,6 +1229,10 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             }
           }
           streamContentRef.current = '';
+
+          // Phase 10: 记忆架构 — 每轮对话后触发 Auto Extraction + Session Memory 更新
+          const currentMessages = sessions.find(s => s.id === activeSessionId)?.messages || [];
+          getMemoryManager().onTurnComplete(activeSessionId, currentMessages);
         },
         onError: (data) => {
           // 流式出错，更新占位消息为错误信息
@@ -1187,9 +1423,14 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     };
     setSessions(prev => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
+
+    // Phase 10: 记忆架构 — 创建 Session Memory
+    getMemoryManager().onSessionStart(newSession.id);
   };
 
   const handleDeleteSession = (sessionId: string) => {
+    // Phase 10: 记忆架构 — 清理 Session Memory
+    getMemoryManager().onSessionEnd(sessionId);
     setSessions(prev => prev.filter(s => s.id !== sessionId));
     if (activeSessionId === sessionId) {
       const remaining = sessions.filter(s => s.id !== sessionId);
@@ -1261,7 +1502,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
       return (
         <div className="space-y-2">
           <MarkdownRenderer content={msg.content} />
-          <WorkflowPreview workflow={msg.metadata.workflow} />
+          <WorkflowPreview workflow={msg.metadata.workflow} onRefine={handleWorkflowRefine} />
         </div>
       );
     }
@@ -1609,6 +1850,24 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
           </div>
         </div>
       </div>
+
+      {/* ===== 路由仪表盘 Overlay ===== */}
+      {showRouterDashboard && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-bg-primary border border-border rounded-2xl shadow-xl w-full max-w-2xl max-h-[80vh] overflow-y-auto p-6">
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-lg font-semibold text-text-primary">路由仪表盘</h2>
+              <button
+                onClick={() => setShowRouterDashboard(false)}
+                className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <RouterDashboard />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

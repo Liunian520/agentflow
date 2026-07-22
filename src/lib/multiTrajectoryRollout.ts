@@ -9,9 +9,10 @@
  */
 
 import type { MetaSkill, OrchestrationPlan } from '../types';
-import { chatLLM, getAvailableChannelFromStore } from '../api/llmApi';
+import { getAvailableChannelFromStore, routedChatLLM } from '../api/llmApi';
 import { metaAgentOrchestrate } from '../components/chat/intent/MetaAgent';
 import { varyMetaSkill } from './metaSkill';
+import { extractTaskFeatures } from './modelRouter';
 
 // 各 rollout 采样温度（制造多样性）
 const ROLLOUT_TEMPERATURES = [0.4, 0.7, 0.9];
@@ -113,18 +114,13 @@ ${candidates}
 请只输出 JSON：{"scores": [编号对应分数...], "bestIndex": 最优方案序号(从1开始)}`;
 
   try {
-    const result = await chatLLM({
-      channelId: channelInfo.channelId,
-      provider: channelInfo.provider as any,
-      baseUrl: channelInfo.baseUrl,
-      apiKey: channelInfo.apiKey,
-      model: channelInfo.models[0]?.name || 'gpt-4o',
+    const result = await routedChatLLM({
       messages: [
         { role: 'user', content: prompt },
       ],
       temperature: 0.2,
       maxTokens: 600,
-    });
+    }, extractTaskFeatures(userInput, { intent: 'plan_evaluation' }));
 
     if (result.success && result.content) {
       const scores = parseScores(result.content, plans.length);

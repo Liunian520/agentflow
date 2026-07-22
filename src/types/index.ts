@@ -595,3 +595,182 @@ export interface ExecutionTrace {
   workflowId?: string;
   duration?: number;
 }
+
+// ===== ACRouter 自进化模型路由类型（基于 Agent-as-a-Router 论文 C-A-F 闭环） =====
+
+export type RouterCategory =
+  | 'creative' | 'reasoning' | 'code'
+  | 'chat' | 'orchestration' | 'multilingual'
+  | 'extraction' | 'recall_select' | 'dream_consolidation';
+
+// (C) Context — 任务特征
+export interface TaskFeatures {
+  intent: string;          // general_chat | smart_orchestrate | agent_chat | workflow_llm_node | reflection | plan_evaluation
+  mode?: AgentMode;
+  category: RouterCategory;
+  keywords: string[];
+  inputLength: number;
+  hasCode: boolean;
+  hasWorkflowKeywords: boolean;
+  inputFingerprint: string; // 原文摘要，用于 kNN 相似度检索
+}
+
+// 路由池候选（每个模型 = 一个 bandit arm）
+export interface RoutingPoolEntry {
+  channelId: string;
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+  displayName: string;
+}
+
+// (A) Action — 路由决策结果
+export interface RoutingDecision {
+  channelId: string;
+  modelName: string;
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  reasoning: string;        // 为何选它（可读说明）
+  alternatives: { modelName: string; score: number }[];
+  explored: boolean;        // 是否 ε 探索（非贪心选择）
+}
+
+// (F) Feedback — 模型级表现记录
+export interface RouterRecord {
+  id: string;
+  timestamp: string;
+  taskFeatures: TaskFeatures;
+  channelId: string;
+  modelName: string;
+  provider: string;
+  outcome: 'success' | 'partial' | 'failure';
+  score: number;            // composite 0..1
+  latencyMs: number;
+  estTokens: number;
+}
+
+// 聚合统计（per model × category）
+export interface ModelPerfStats {
+  modelKey: string;         // `${provider}:${modelName}`
+  category: RouterCategory;
+  samples: number;
+  avgScore: number;
+  successRate: number;
+  avgLatency: number;
+  avgCost: number;          // avg estTokens
+}
+
+// ===== 统一记忆架构类型（Phase 10：四层记忆 + 三个横切机制） =====
+
+// L0: Working Memory — 10 个固定 section（参考 Claude Code Session Memory）
+export type SessionSectionKey =
+  | 'current_state'    // 当前正在做什么
+  | 'task_spec'        // 用户原始需求+约束
+  | 'files'            // 已读/已写/已改文件清单
+  | 'workflow'         // 当前编排方案+执行进度
+  | 'errors'           // 遇到的问题及解决方式
+  | 'learnings'        // 本会话学到的用户偏好/纠正
+  | 'key_results'      // 已产出的重要输出
+  | 'worklog'          // 按时间序的关键操作
+  | 'pending'          // 未完成的任务
+  | 'context_summary'; // 压缩后的历史对话要点
+
+export interface SessionMemory {
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
+  tokenEstimate: number;
+  toolCallCount: number;
+  sections: Record<SessionSectionKey, string>;
+  lastCompactAt?: string;
+}
+
+// L1: Factual Memory — 4 类事实记忆（参考 Claude Code Auto Memory Extraction）
+export type FactualMemoryType = 'user' | 'feedback' | 'project' | 'reference';
+
+export interface FactualMemory {
+  id: string;
+  type: FactualMemoryType;
+  content: string;
+  tags: string[];
+  keywords: string[];
+  source: 'auto_extraction' | 'auto_extraction_fallback' | 'user_edit' | 'auto_dream';
+  sessionId?: string;
+  messageId?: string;
+  createdAt: string;
+  updatedAt: string;
+  accessCount: number;
+  lastAccessedAt?: string;
+  importance: number;  // 0..1
+}
+
+// L2-B: Experiential Reflection — 编排经验反思（Skill-MAS Selective Reflection 升级）
+export interface ExperientialReflection {
+  id: string;
+  timestamp: string;
+  trigger: string;
+  summary: string;
+  principles: string[];
+  layer: 'decomposition' | 'engineering' | 'orchestration' | 'general';
+  basedOnTraceIds: string[];
+  basedOnTraceCount: number;
+  consolidatedFromTraces?: boolean;
+}
+
+// 横切: Auto Extraction 结果
+export interface ExtractionResult {
+  extracted: FactualMemory[];
+  method: 'llm' | 'keyword_fallback' | 'skipped_self_edit';
+  cursorUpdated: boolean;
+  processedMessageUuid?: string;
+  skipped?: boolean;
+  reason?: string;
+}
+
+// 横切: Dynamic Recall 结果
+export interface RecallResult {
+  candidates: { memory: FactualMemory; score: number; reason: string }[];
+  selected: FactualMemory[];  // ≤ 5 条
+  injectedContext: string;
+}
+
+// 横切: Handoff Summary（参考 Codex 上下文压缩）
+export interface HandoffSummary {
+  id: string;
+  timestamp: string;
+  sessionId: string;
+  summary: string;
+  preservedMessageCount: number;
+  compactedMessageCount: number;
+  triggerTokenCount: number;
+}
+
+// 横切: Auto Dream 日志（参考 Claude Code tengu_onyx_plover）
+export interface DreamLog {
+  id: string;
+  timestamp: string;
+  phase: 'orientation' | 'gather_signal' | 'consolidation' | 'prune';
+  summary: string;
+  changes: {
+    factualMerged: number;
+    factualPruned: number;
+    tracesConsolidated: number;
+    reflectionsMerged: number;
+  };
+  duration: number;
+}
+
+// 横切: Memory Audit 日志
+export interface MemoryAuditEntry {
+  id: string;
+  timestamp: string;
+  layer: 'L0' | 'L1' | 'L2' | 'L3';
+  action: 'create' | 'update' | 'delete' | 'merge' | 'prune' | 'recall';
+  targetId: string;
+  targetType: string;
+  before?: string;
+  after?: string;
+  source: 'auto' | 'user' | 'dream' | 'extraction' | 'reflection' | 'self_edit';
+}

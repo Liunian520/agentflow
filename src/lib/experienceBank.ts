@@ -144,7 +144,7 @@ export function buildExperienceContext(relevantTraces: ExecutionTrace[]): string
 // ===== 简单文本相似度计算 =====
 // 基于 Jaccard 词集合相似度 + 关键词命中加分
 
-function computeSimilarity(textA: string, textB: string): number {
+export function computeSimilarity(textA: string, textB: string): number {
   const wordsA = tokenize(textA);
   const wordsB = tokenize(textB);
 

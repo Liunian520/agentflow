@@ -3,6 +3,12 @@
  * 通过后端 SSE 代理调用，避免前端暴露 API Key
  */
 
+import type { TaskFeatures, RoutingDecision } from '../types';
+import {
+  getRoutingPool, selectModel, buildRouterRecord, recordRouterFeedback,
+  estimateTokens, maybeCompactRouterMemory,
+} from '../lib/modelRouter';
+
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001/api';
 
 // ===== 类型定义 =====
@@ -344,6 +350,173 @@ export async function getChannelForModel(modelName: string): Promise<{
   }
 
   return null;
+}
+
+// ===== ACRouter 路由化调用（C-A-F 闭环：选模型→调用→采集反馈→回写） =====
+
+export interface RoutedChatOptions {
+  messages: LLMChatOptions['messages'];
+  temperature?: number;
+  maxTokens?: number;
+  tools?: any[];
+}
+
+export interface RoutedChatResult extends LLMChatResult {
+  routing?: RoutingDecision;
+}
+
+export interface RoutedSSECallbacks extends SSECallbacks {
+  onRouting?: (decision: RoutingDecision) => void;
+}
+
+/**
+ * 非流式路由调用：自动选最优模型 → 调用 → 采集反馈(outcome/延迟/token) → 回写 routerMemory。
+ * 调用方只需提供 messages 等参数 + taskFeatures，无需指定 channelId/model。
+ */
+export async function routedChatLLM(
+  options: RoutedChatOptions,
+  taskFeatures: TaskFeatures,
+): Promise<RoutedChatResult> {
+  const pool = await getRoutingPool();
+  const decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+
+  // 无可用模型 → 降级返回失败
+  if (!decision) {
+    return {
+      success: false,
+      content: '',
+      model: '',
+      provider: '',
+      timestamp: new Date().toISOString(),
+      message: '未配置可用的 LLM 渠道，请在「渠道设置」中添加 API Key。',
+    };
+  }
+
+  const start = Date.now();
+  try {
+    const result = await chatLLM({
+      channelId: decision.channelId,
+      provider: decision.provider as any,
+      baseUrl: decision.baseUrl,
+      apiKey: decision.apiKey,
+      model: decision.modelName,
+      messages: options.messages,
+      temperature: options.temperature,
+      maxTokens: options.maxTokens,
+      tools: options.tools,
+    });
+
+    const latencyMs = Date.now() - start;
+    const estTokens = estimateTokens(
+      options.messages.map((m) => m.content).join('') + (result.content || ''),
+    );
+    const outcome = result.success ? 'success' : 'failure';
+
+    const record = buildRouterRecord(taskFeatures, decision, outcome, latencyMs, estTokens);
+    await recordRouterFeedback(record);
+    await maybeCompactRouterMemory();
+
+    return { ...result, routing: decision };
+  } catch (error: any) {
+    const latencyMs = Date.now() - start;
+    const estTokens = estimateTokens(options.messages.map((m) => m.content).join(''));
+    const record = buildRouterRecord(taskFeatures, decision, 'failure', latencyMs, estTokens);
+    await recordRouterFeedback(record);
+    await maybeCompactRouterMemory();
+
+    return {
+      success: false,
+      content: '',
+      model: decision.modelName,
+      provider: decision.provider,
+      timestamp: new Date().toISOString(),
+      message: error.message || 'LLM 调用异常',
+      routing: decision,
+    };
+  }
+}
+
+/**
+ * 流式路由调用：自动选最优模型 → SSE 流式调用 → onDone/onError 时回写反馈。
+ */
+export function routedChatLLMStream(
+  options: RoutedChatOptions,
+  taskFeatures: TaskFeatures,
+  callbacks: RoutedSSECallbacks,
+): AbortController {
+  const controller = new AbortController();
+  let decision: RoutingDecision | null = null;
+  let start = 0;
+  let fullContent = '';
+
+  // 异步：先选模型，再发起流式调用
+  (async () => {
+    const pool = await getRoutingPool();
+    decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+
+    if (!decision) {
+      callbacks.onError?.({ message: '未配置可用的 LLM 渠道，请在「渠道设置」中添加 API Key。' });
+      return;
+    }
+
+    callbacks.onRouting?.(decision);
+    start = Date.now();
+
+    // 复用增强版 SSE 解析器
+    const inner = chatLLMStreamEnhanced(
+      {
+        channelId: decision.channelId,
+        provider: decision.provider as any,
+        baseUrl: decision.baseUrl,
+        apiKey: decision.apiKey,
+        model: decision.modelName,
+        messages: options.messages,
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        tools: options.tools,
+      },
+      {
+        onStart: (data) => callbacks.onStart?.(data),
+        onDelta: (data) => {
+          fullContent = data.fullContent || fullContent;
+          callbacks.onDelta?.(data);
+        },
+        onTool: (data) => callbacks.onTool?.(data),
+        onDone: async (data) => {
+          const latencyMs = Date.now() - start;
+          const content = data.content || fullContent;
+          const estTokens = estimateTokens(
+            options.messages.map((m) => m.content).join('') + content,
+          );
+          const record = buildRouterRecord(taskFeatures, decision!, 'success', latencyMs, estTokens);
+          await recordRouterFeedback(record);
+          await maybeCompactRouterMemory();
+          callbacks.onDone?.(data);
+        },
+        onError: async (data) => {
+          const latencyMs = Date.now() - start;
+          const estTokens = estimateTokens(options.messages.map((m) => m.content).join(''));
+          const record = buildRouterRecord(taskFeatures, decision!, 'failure', latencyMs, estTokens);
+          await recordRouterFeedback(record);
+          await maybeCompactRouterMemory();
+          callbacks.onError?.(data);
+        },
+      },
+    );
+    // 把内部 controller 的 abort 透传到外部
+    // 注意：inner 是独立 controller，这里用事件代理
+    controller.signal.addEventListener('abort', () => inner.abort());
+  })().catch((err) => {
+    callbacks.onError?.({ message: err.message || '路由调用异常' });
+  });
+
+  return controller;
+}
+
+// 获取 routerMemory 快照（供 selectModel 决策）
+async function getRouterMemorySnapshot() {
+  const { useStore } = await import('../store/useStore');
+  return useStore.getState().routerMemory;
 }
 
 // ===== MCP 服务器管理客户端（Phase 6） =====

@@ -18,7 +18,8 @@ import {
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
 import type { Agent } from '../types';
-import { chatLLMStreamEnhanced, getAvailableChannelFromStore, getChannelForModel } from '../api/llmApi';
+import { getAvailableChannelFromStore, getChannelForModel, routedChatLLMStream } from '../api/llmApi';
+import { extractTaskFeatures } from '../lib/modelRouter';
 
 type DrawerType = 'settings' | 'create' | 'manage' | 'more' | null;
 
@@ -135,18 +136,14 @@ export function AgentsPage() {
       { role: 'user' as const, content: inputValue },
     ];
 
-    // 发起 SSE 流式调用
-    const abortController = chatLLMStreamEnhanced(
+    // 发起 SSE 流式调用（ACRouter 路由：自动选最优模型 + 反馈回写）
+    const abortController = routedChatLLMStream(
       {
-        channelId: channelInfo.channelId,
-        provider: channelInfo.provider as any,
-        baseUrl: channelInfo.baseUrl,
-        apiKey: channelInfo.apiKey,
-        model: targetModel,
         messages: llmMessages,
         temperature: agent?.temperature ?? 0.7,
         maxTokens: agent?.maxTokens ?? 2048,
       },
+      extractTaskFeatures(inputValue, { intent: 'agent_chat' }),
       {
         onDelta: (data) => {
           // 实时更新流式消息内容

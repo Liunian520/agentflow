@@ -13,7 +13,8 @@ import type {
   PlannedAgent, PlannedWorkflow,
   IntentAction, NodeType, ActionResult,
 } from '../../../types';
-import { chatLLM, getAvailableChannelFromStore } from '../../../api/llmApi';
+import { getAvailableChannelFromStore, routedChatLLM } from '../../../api/llmApi';
+import { extractTaskFeatures } from '../../../lib/modelRouter';
 import { buildMetaAgentSystemPrompt, INITIAL_META_SKILL } from '../../../lib/metaSkill';
 import { generateId } from '../../../lib/utils';
 
@@ -37,6 +38,8 @@ export function shouldUseMetaAgent(intent: ParsedIntent): boolean {
 // ===== Meta-Agent 核心编排调用 =====
 export interface MetaAgentOptions {
   experienceContext?: string;  // 注入的相关历史经验（Phase 2）
+  recalledMemoryContext?: string; // Phase 10: Dynamic Recall 召回的跨会话记忆
+  sessionMemoryContext?: string;  // Phase 10: Session Memory 会话工作记忆
   temperature?: number;       // 采样温度（Phase 4 多轨迹用）
 }
 
@@ -53,8 +56,9 @@ export async function metaAgentOrchestrate(
     return createFallbackPlan();
   }
 
-  // 构建系统提示词（注入 Meta-Skill 三层策略）
-  const systemPrompt = buildMetaAgentSystemPrompt(metaSkill);
+  // 构建系统提示词（注入 Meta-Skill 三层策略 + Session Memory 固定前缀）
+  const sessionPrefix = options.sessionMemoryContext ? `${options.sessionMemoryContext}\n\n` : '';
+  const systemPrompt = `${sessionPrefix}${buildMetaAgentSystemPrompt(metaSkill)}`;
 
   // 构建用户消息（包含当前系统上下文 + 历史经验）
   const { useStore } = await import('../../../store/useStore');
@@ -67,23 +71,19 @@ Current system context:
 - Available node types: start, end, llm, agent, code, http, condition, loop, variable, database, host, knowledge, template, human-in-loop, subworkflow, subagent
 - 当任务需要多个角色协作且可并行时，优先使用 subagent 节点（并行 Agent 团队），其 config 形如：{ "agents": [{"id":"sub-1","name":"研究员","model":"GPT-4o","systemPrompt":"...","tools":[]}], "aggregatorPrompt":"整合为最终交付物", "outputVariable":"subagent_result", "parallel": true }
 
-User request: ${userInput}${options.experienceContext ? '\n' + options.experienceContext : ''}`;
+User request: ${userInput}${options.experienceContext ? '\n' + options.experienceContext : ''}${options.recalledMemoryContext ? '\n' + options.recalledMemoryContext : ''}${options.sessionMemoryContext ? '\n' + options.sessionMemoryContext : ''}`;
 
-  // 调用 LLM（非流式，因为需要解析结构化 JSON）
+  // ACRouter 路由：自动选最优模型（C-A-F 闭环）
+  const taskFeatures = extractTaskFeatures(userInput, { intent: 'smart_orchestrate' });
   try {
-    const result = await chatLLM({
-      channelId: channelInfo.channelId,
-      provider: channelInfo.provider as any,
-      baseUrl: channelInfo.baseUrl,
-      apiKey: channelInfo.apiKey,
-      model: channelInfo.models[0]?.name || 'gpt-4o',
+    const result = await routedChatLLM({
       messages: [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: contextInfo },
       ],
       temperature: options.temperature ?? 0.5, // 较低温度确保结构化输出稳定
       maxTokens: 2048,
-    });
+    }, taskFeatures);
 
     if (result.success && result.content) {
       return parseOrchestrationPlan(result.content);

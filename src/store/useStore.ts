@@ -1,12 +1,13 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog, MetaSkill, ExecutionTrace, SubAgentDef, MCPServer, MCPTool } from '../types';
+import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog, MetaSkill, ExecutionTrace, SubAgentDef, MCPServer, MCPTool, RouterRecord, SessionMemory, FactualMemory, ExperientialReflection, DreamLog, MemoryAuditEntry, HandoffSummary } from '../types';
 import { mockWorkflows, mockAgents, mockPlugins, mockTemplates, mockMessages, nodeTemplates, mockHosts } from '../data/mockData';
 import { generateId } from '../lib/utils';
 import { sshApi } from '../api/sshApi';
 import { hashPassword, verifyPassword } from '../lib/passwordUtils';
-import { chatLLM, getChannelForModel, getAvailableChannelFromStore } from '../api/llmApi';
+import { getChannelForModel, getAvailableChannelFromStore, routedChatLLM } from '../api/llmApi';
 import { INITIAL_META_SKILL } from '../lib/metaSkill';
+import { extractTaskFeatures } from '../lib/modelRouter';
 
 // ===== 检查点（命名快照，持久化） =====
 export interface Checkpoint {
@@ -147,7 +148,14 @@ interface AppState {
   // Experience Bank
   experienceBank: ExecutionTrace[];
   addTrace: (trace: ExecutionTrace) => void;
+  setExperienceBank: (traces: ExecutionTrace[]) => void;
   clearTraces: () => void;
+
+  // Router Memory (ACRouter 模型级表现记忆)
+  routerMemory: RouterRecord[];
+  addRouterRecord: (record: RouterRecord) => void;
+  clearRouterMemory: () => void;
+  setRouterMemory: (records: RouterRecord[]) => void;
 
   // MCP Servers (Phase 6：MCP 工具集成)
   mcps: MCPServer[];
@@ -155,6 +163,44 @@ interface AppState {
   updateMCP: (id: string, updates: Partial<MCPServer>) => void;
   deleteMCP: (id: string) => void;
   setMCPStatus: (id: string, status: MCPServer['status'], tools?: MCPTool[], lastError?: string) => void;
+
+  // ===== 统一记忆架构（Phase 10：四层记忆 + 三个横切机制） =====
+
+  // L0: Working Memory — 非持久化，会话内
+  sessionMemories: Record<string, SessionMemory>;
+  setSessionMemory: (sessionId: string, memory: SessionMemory) => void;
+  clearSessionMemory: (sessionId: string) => void;
+
+  // L1: Factual Memory — 持久化，跨会话事实
+  factualMemory: FactualMemory[];
+  addFactualMemory: (memory: Omit<FactualMemory, 'id' | 'createdAt' | 'updatedAt' | 'accessCount'>) => void;
+  updateFactualMemory: (id: string, updates: Partial<FactualMemory>) => void;
+  deleteFactualMemory: (id: string) => void;
+  incrementFactualAccess: (id: string) => void;
+  setFactualMemory: (memories: FactualMemory[]) => void;
+
+  // L2-B: Experiential Reflections — 持久化
+  experientialReflections: ExperientialReflection[];
+  addExperientialReflection: (reflection: ExperientialReflection) => void;
+  updateExperientialReflection: (id: string, updates: Partial<ExperientialReflection>) => void;
+  deleteExperientialReflection: (id: string) => void;
+  setExperientialReflections: (reflections: ExperientialReflection[]) => void;
+
+  // 横切: Auto Extraction 光标 — 持久化
+  extractionCursors: Record<string, string>;
+  setExtractionCursor: (sessionId: string, messageId: string) => void;
+
+  // 横切: Auto Dream 日志 — 持久化
+  dreamLogs: DreamLog[];
+  addDreamLog: (log: DreamLog) => void;
+
+  // 横切: Handoff Summary 历史 — 持久化
+  handoffSummaries: HandoffSummary[];
+  addHandoffSummary: (summary: HandoffSummary) => void;
+
+  // 横切: Memory Audit — 持久化
+  memoryAuditLog: MemoryAuditEntry[];
+  addMemoryAudit: (entry: Omit<MemoryAuditEntry, 'id' | 'timestamp'>) => void;
 }
 
 // ===== 工具解析辅助（Phase 6：将 MCP 工具标识解析为 OpenAI function 调用 schema） =====
@@ -612,17 +658,12 @@ export const useStore = create<AppState>()(
             // Phase 6：解析 LLM 节点配置的 MCP 工具
             const llmTools = resolveToolSchemas(config?.tools);
 
-            const result = await chatLLM({
-              channelId: channelInfo.channelId,
-              provider: channelInfo.provider as any,
-              baseUrl: channelInfo.baseUrl,
-              apiKey: channelInfo.apiKey,
-              model: targetModel,
+            const result = await routedChatLLM({
               messages: llmMessages,
               temperature: config?.temperature ?? 0.7,
               maxTokens: config?.maxTokens ?? 2048,
               tools: llmTools,
-            });
+            }, extractTaskFeatures(userContent, { intent: 'workflow_llm_node' }));
 
             if (result.success && result.content) {
               llmResult = result.content;
@@ -713,17 +754,12 @@ export const useStore = create<AppState>()(
             // Phase 6：解析 Agent 配置的 MCP 工具
             const agentTools = resolveToolSchemas(config?.tools);
 
-            const result = await chatLLM({
-              channelId: channelInfo.channelId,
-              provider: channelInfo.provider as any,
-              baseUrl: channelInfo.baseUrl,
-              apiKey: channelInfo.apiKey,
-              model: targetModel,
+            const result = await routedChatLLM({
               messages: agentMessages,
               temperature: config?.temperature ?? 0.5,
               maxTokens: config?.maxTokens ?? 2048,
               tools: agentTools,
-            });
+            }, extractTaskFeatures(contextStr, { intent: 'workflow_llm_node' }));
 
             if (result.success && result.content) {
               newVariables['agent_result'] = {
@@ -820,17 +856,12 @@ export const useStore = create<AppState>()(
           ];
           const tools = resolveToolSchemas(a.tools);
 
-          const r = await chatLLM({
-            channelId: channelInfo.channelId,
-            provider: channelInfo.provider as any,
-            baseUrl: channelInfo.baseUrl,
-            apiKey: channelInfo.apiKey,
-            model: targetModel,
+          const r = await routedChatLLM({
             messages,
             temperature: a.temperature ?? 0.5,
             maxTokens: a.maxTokens ?? 2048,
             tools,
-          });
+          }, extractTaskFeatures(input, { intent: 'workflow_llm_node' }));
 
           return {
             name: a.name,
@@ -858,19 +889,14 @@ export const useStore = create<AppState>()(
           try {
             const aggChannel = await getAvailableChannelFromStore();
             if (aggChannel) {
-              const agg = await chatLLM({
-                channelId: aggChannel.channelId,
-                provider: aggChannel.provider as any,
-                baseUrl: aggChannel.baseUrl,
-                apiKey: aggChannel.apiKey,
-                model: aggChannel.models[0]?.name || 'gpt-4o',
+              const agg = await routedChatLLM({
                 messages: [
                   { role: 'system', content: config.aggregatorPrompt },
                   { role: 'user', content: parts },
                 ],
                 temperature: 0.3,
                 maxTokens: 2048,
-              });
+              }, extractTaskFeatures(parts, { intent: 'workflow_llm_node' }));
               if (agg.success && agg.content) summary = agg.content;
             }
           } catch {
@@ -977,19 +1003,14 @@ export const useStore = create<AppState>()(
                 code = code.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
               }
 
-              const result = await chatLLM({
-                channelId: channelInfo.channelId,
-                provider: channelInfo.provider as any,
-                baseUrl: channelInfo.baseUrl,
-                apiKey: channelInfo.apiKey,
-                model: channelInfo.models[0]?.name || 'gpt-4o',
+              const result = await routedChatLLM({
                 messages: [
                   { role: 'system', content: `你是一个代码执行助手。用户会给你一段 ${config.language || 'javascript'} 代码和输入变量，请模拟执行这段代码并返回结果。只输出执行结果，不要解释。` },
                   { role: 'user', content: `代码:\n${code}\n\n变量:\n${JSON.stringify(newVariables)}` },
                 ],
                 temperature: 0.1,
                 maxTokens: 2048,
-              });
+              }, extractTaskFeatures(code, { intent: 'workflow_llm_node' }));
 
               newVariables[outputVar] = result.success ? { result: result.content } : { error: result.message };
               newLogs.push({
@@ -1767,7 +1788,15 @@ export const useStore = create<AppState>()(
   experienceBank: [],
   addTrace: (trace) =>
     set((state) => ({ experienceBank: [...state.experienceBank, trace] })),
+  setExperienceBank: (traces) => set({ experienceBank: traces }),
   clearTraces: () => set({ experienceBank: [] }),
+
+  // Router Memory (ACRouter 模型级表现记忆)
+  routerMemory: [],
+  addRouterRecord: (record) =>
+    set((state) => ({ routerMemory: [...state.routerMemory, record] })),
+  clearRouterMemory: () => set({ routerMemory: [] }),
+  setRouterMemory: (records) => set({ routerMemory: records }),
 
   // MCP Servers
   mcps: [],
@@ -1801,6 +1830,105 @@ export const useStore = create<AppState>()(
           : m,
       ),
     })),
+
+  // ===== 统一记忆架构（Phase 10） =====
+
+  // L0: Working Memory（非持久化）
+  sessionMemories: {},
+  setSessionMemory: (sessionId, memory) =>
+    set((state) => ({
+      sessionMemories: { ...state.sessionMemories, [sessionId]: memory },
+    })),
+  clearSessionMemory: (sessionId) =>
+    set((state) => {
+      const mems = { ...state.sessionMemories };
+      delete mems[sessionId];
+      return { sessionMemories: mems };
+    }),
+
+  // L1: Factual Memory（持久化）
+  factualMemory: [],
+  addFactualMemory: (memory) =>
+    set((state) => ({
+      factualMemory: [
+        ...state.factualMemory,
+        {
+          ...memory,
+          id: `fm-${generateId()}`,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          accessCount: 0,
+        },
+      ],
+    })),
+  updateFactualMemory: (id, updates) =>
+    set((state) => ({
+      factualMemory: state.factualMemory.map((m) =>
+        m.id === id ? { ...m, ...updates, updatedAt: new Date().toISOString() } : m
+      ),
+    })),
+  deleteFactualMemory: (id) =>
+    set((state) => ({
+      factualMemory: state.factualMemory.filter((m) => m.id !== id),
+    })),
+  incrementFactualAccess: (id) =>
+    set((state) => ({
+      factualMemory: state.factualMemory.map((m) =>
+        m.id === id
+          ? { ...m, accessCount: m.accessCount + 1, lastAccessedAt: new Date().toISOString() }
+          : m
+      ),
+    })),
+  setFactualMemory: (memories) => set({ factualMemory: memories }),
+
+  // L2-B: Experiential Reflections（持久化）
+  experientialReflections: [],
+  addExperientialReflection: (reflection) =>
+    set((state) => ({
+      experientialReflections: [...state.experientialReflections, reflection],
+    })),
+  updateExperientialReflection: (id, updates) =>
+    set((state) => ({
+      experientialReflections: state.experientialReflections.map((r) =>
+        r.id === id ? { ...r, ...updates } : r
+      ),
+    })),
+  deleteExperientialReflection: (id) =>
+    set((state) => ({
+      experientialReflections: state.experientialReflections.filter((r) => r.id !== id),
+    })),
+  setExperientialReflections: (reflections) => set({ experientialReflections: reflections }),
+
+  // 横切: Auto Extraction 光标（持久化）
+  extractionCursors: {},
+  setExtractionCursor: (sessionId, messageId) =>
+    set((state) => ({
+      extractionCursors: { ...state.extractionCursors, [sessionId]: messageId },
+    })),
+
+  // 横切: Auto Dream 日志（持久化）
+  dreamLogs: [],
+  addDreamLog: (log) =>
+    set((state) => ({ dreamLogs: [...state.dreamLogs, log] })),
+
+  // 横切: Handoff Summary 历史（持久化）
+  handoffSummaries: [],
+  addHandoffSummary: (summary) =>
+    set((state) => ({ handoffSummaries: [...state.handoffSummaries, summary] })),
+
+  // 横切: Memory Audit 日志（持久化）
+  memoryAuditLog: [],
+  addMemoryAudit: (entry) =>
+    set((state) => ({
+      memoryAuditLog: [
+        ...state.memoryAuditLog,
+        {
+          ...entry,
+          id: `audit-${generateId()}`,
+          timestamp: new Date().toISOString(),
+        },
+      ],
+    })),
     }),
     {
       name: 'agentflow-data',
@@ -1819,8 +1947,17 @@ export const useStore = create<AppState>()(
         sidebarCollapsed: state.sidebarCollapsed,
         metaSkill: state.metaSkill,
         experienceBank: state.experienceBank,
+        routerMemory: state.routerMemory,
         mcps: state.mcps,
         checkpoints: state.checkpoints,
+        // Phase 10: 记忆架构持久化字段
+        factualMemory: state.factualMemory,
+        experientialReflections: state.experientialReflections,
+        extractionCursors: state.extractionCursors,
+        dreamLogs: state.dreamLogs,
+        handoffSummaries: state.handoffSummaries,
+        memoryAuditLog: state.memoryAuditLog,
+        // sessionMemories 不持久化（L0 仅存活于会话内）
       }),
       // 存储序列化冲突时静默处理
       storage: {

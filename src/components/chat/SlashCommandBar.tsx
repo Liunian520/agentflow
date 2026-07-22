@@ -17,6 +17,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   { id: 'ssh', command: '/ssh', label: 'SSH 命令', description: '在远程主机执行命令', mode: 'code', icon: '🖥️' },
   { id: 'reflect', command: '/reflect', label: '反思进化', description: '基于失败经验进化 Meta-Skill', icon: '🧬' },
   { id: 'optimize', command: '/optimize', label: '多轨迹选优', description: '生成多候选方案并自动选优', mode: 'code', icon: '🔀' },
+  { id: 'router', command: '/router', label: '路由仪表盘', description: '查看 ACRouter 自进化路由统计与趋势', icon: '📊' },
+  { id: 'dream', command: '/dream', label: '记忆整合', description: '触发 Auto Dream 四阶段跨会话整合', icon: '🌙' },
+  { id: 'extract', command: '/extract', label: '手动提取', description: '手动触发 Auto Extraction 从当轮对话提取事实', icon: '💡' },
+  { id: 'memory', command: '/memory', label: '记忆统计', description: '查看四层记忆架构的统计信息', icon: '🧠' },
   { id: 'help', command: '/help', label: '帮助', description: '查看所有可用命令', icon: '❓' },
 ];
 
