@@ -3,6 +3,7 @@ import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
   Trash2, ChevronLeft, ChevronRight, Lightbulb,
   Paperclip, FileText, X, Image as ImageIcon,
+  Cpu, Zap,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
@@ -136,7 +137,10 @@ function generateResponse(intent: ParsedIntent, result: ActionResult, mode: Agen
 // ===== 主页面组件 =====
 
 export function ChatWorkspacePage() {
-  const { agents, workflows, metaSkill } = useStore();
+  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled } = useStore();
+
+  // 最近一次路由决策使用的模型信息（来自 onRouting 回调）
+  const [lastUsedModel, setLastUsedModel] = useState<{ provider: string; model: string; displayName?: string } | null>(null);
 
   // 模式状态
   const [activeMode, setActiveMode] = useState<AgentMode>('code');
@@ -1161,6 +1165,14 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
       },
       extractTaskFeatures(text, { intent: 'general_chat', mode: activeMode }),
       {
+        onRouting: (decision) => {
+          // 更新模型指示器
+          setLastUsedModel({
+            provider: decision.provider,
+            model: decision.modelName,
+            displayName: decision.modelDisplayName || decision.modelName,
+          });
+        },
         onStart: () => {
           // 开始收到流式数据
         },
@@ -1603,7 +1615,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 
       {/* 主对话区 */}
       <div className="flex-1 flex flex-col bg-bg-secondary">
-        {/* 顶栏 — 模式选择器 */}
+        {/* 顶栏 — 模式选择器 + 模型指示器 */}
         <div className="h-14 bg-white border-b border-border flex items-center justify-between px-4">
           <div className="flex items-center gap-3">
             <Sparkles className="w-5 h-5 text-accent" />
@@ -1622,6 +1634,37 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             </span>
           </div>
           <div className="flex items-center gap-2">
+            {/* 模型指示器 */}
+            {lastUsedModel ? (
+              <span
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full bg-violet-50 text-violet-700 border border-violet-200 cursor-default"
+                title={`当前模型: ${lastUsedModel.model} (${lastUsedModel.provider})`}
+              >
+                <Cpu className="w-3 h-3" />
+                {lastUsedModel.displayName || lastUsedModel.model}
+              </span>
+            ) : routerEnabled ? (
+              <span
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 cursor-default"
+                title="ACRouter 智能路由已启用，将根据任务自动选模型"
+              >
+                <Zap className="w-3 h-3" />
+                自动路由
+              </span>
+            ) : defaultModelId ? (
+              <span
+                className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-full bg-blue-50 text-blue-700 border border-blue-200 cursor-default"
+                title={`固定模型: ${defaultModelId}`}
+              >
+                <Cpu className="w-3 h-3" />
+                {(() => {
+                  const [chId, modelName] = defaultModelId.split(':');
+                  const ch = channels.find(c => c.id === chId);
+                  const m = ch?.models.find(m => m.name === modelName);
+                  return m?.displayName || modelName;
+                })()}
+              </span>
+            ) : null}
             <ModeSelector activeMode={activeMode} onModeChange={setActiveMode} />
             <span
               className="hidden sm:flex items-center gap-1 px-2 py-1 text-xs rounded-full bg-bg-secondary text-text-tertiary border border-border"

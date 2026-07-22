@@ -629,12 +629,14 @@ export interface RoutingPoolEntry {
 export interface RoutingDecision {
   channelId: string;
   modelName: string;
+  modelDisplayName?: string; // 显示名称（如 "DeepSeek V3"）
   provider: string;
   baseUrl: string;
   apiKey: string;
   reasoning: string;        // 为何选它（可读说明）
   alternatives: { modelName: string; score: number }[];
   explored: boolean;        // 是否 ε 探索（非贪心选择）
+  strategy?: 'statistical' | 'knn' | 'cold_start' | 'manual'; // 选模型策略
 }
 
 // (F) Feedback — 模型级表现记录

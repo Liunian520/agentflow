@@ -377,8 +377,16 @@ export async function routedChatLLM(
   options: RoutedChatOptions,
   taskFeatures: TaskFeatures,
 ): Promise<RoutedChatResult> {
-  const pool = await getRoutingPool();
-  const decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+  // 手动模式：优先使用用户指定的默认模型
+  const manualDecision = await getManualRoutingDecision();
+  let decision: RoutingDecision | null;
+
+  if (manualDecision) {
+    decision = manualDecision;
+  } else {
+    const pool = await getRoutingPool();
+    decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+  }
 
   // 无可用模型 → 降级返回失败
   if (!decision) {
@@ -451,8 +459,14 @@ export function routedChatLLMStream(
 
   // 异步：先选模型，再发起流式调用
   (async () => {
-    const pool = await getRoutingPool();
-    decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+    // 手动模式：优先使用用户指定的默认模型
+    const manualDecision = await getManualRoutingDecision();
+    if (manualDecision) {
+      decision = manualDecision;
+    } else {
+      const pool = await getRoutingPool();
+      decision = selectModel(taskFeatures, pool, await getRouterMemorySnapshot());
+    }
 
     if (!decision) {
       callbacks.onError?.({ message: '未配置可用的 LLM 渠道，请在「渠道设置」中添加 API Key。' });
@@ -517,6 +531,34 @@ export function routedChatLLMStream(
 async function getRouterMemorySnapshot() {
   const { useStore } = await import('../store/useStore');
   return useStore.getState().routerMemory;
+}
+
+// 从 store 读取路由偏好：如果 routerEnabled=false 且 defaultModelId 有值，直接使用指定模型
+async function getManualRoutingDecision(): Promise<RoutingDecision | null> {
+  const { useStore } = await import('../store/useStore');
+  const state = useStore.getState();
+  if (state.routerEnabled) return null;  // 自动路由模式，不干预
+  if (!state.defaultModelId) return null; // 没指定默认模型
+
+  // defaultModelId 格式: "channelId:modelName"
+  const [channelId, modelName] = state.defaultModelId.split(':');
+  const channel = state.channels.find(c => c.id === channelId && c.enabled);
+  if (!channel) return null;
+  const model = channel.models.find(m => m.name === modelName);
+  if (!model) return null;
+
+  return {
+    channelId: channel.id,
+    provider: channel.provider,
+    baseUrl: channel.baseUrl,
+    apiKey: channel.apiKey,
+    modelName: model.name,
+    modelDisplayName: model.displayName || model.name,
+    reasoning: '用户手动选择',
+    alternatives: [],
+    explored: false,
+    strategy: 'manual',
+  };
 }
 
 // ===== MCP 服务器管理客户端（Phase 6） =====

@@ -74,7 +74,15 @@ interface AppState {
   updateChannel: (id: string, updates: Partial<Channel>) => void;
   deleteChannel: (id: string) => void;
   toggleChannelEnabled: (id: string) => void;
-  getAvailableModels: () => { channelId: string; channelName: string; model: { name: string; displayName: string } }[];
+  getAvailableModels: () => { channelId: string; channelName: string; provider: string; model: { name: string; displayName: string } }[];
+
+  // 模型路由与选择
+  defaultModelId: string | null;     // 手动指定默认模型（格式: channelId:modelName），null = ACRouter 自动路由
+  routerEnabled: boolean;            // ACRouter 自动路由开关，false = 使用 defaultModelId
+  theme: 'light' | 'dark' | 'system';// 界面主题
+  setDefaultModelId: (id: string | null) => void;
+  setRouterEnabled: (enabled: boolean) => void;
+  setTheme: (theme: 'light' | 'dark' | 'system') => void;
 
   // Remote Hosts
   hosts: RemoteHost[];
@@ -353,14 +361,22 @@ export const useStore = create<AppState>()(
     })),
   getAvailableModels: () => {
     const channels = get().channels.filter((c) => c.enabled);
-    const models: { channelId: string; channelName: string; model: { name: string; displayName: string } }[] = [];
+    const models: { channelId: string; channelName: string; provider: string; model: { name: string; displayName: string } }[] = [];
     channels.forEach((ch) => {
       ch.models.forEach((m) => {
-        models.push({ channelId: ch.id, channelName: ch.name, model: { name: m.name, displayName: m.displayName } });
+        models.push({ channelId: ch.id, channelName: ch.name, provider: ch.provider, model: { name: m.name, displayName: m.displayName } });
       });
     });
     return models;
   },
+
+  // 模型路由与选择
+  defaultModelId: null,
+  routerEnabled: true,
+  theme: 'light',
+  setDefaultModelId: (id) => set({ defaultModelId: id }),
+  setRouterEnabled: (enabled) => set({ routerEnabled: enabled }),
+  setTheme: (theme) => set({ theme }),
 
   // Remote Hosts
   hosts: mockHosts,
@@ -1939,6 +1955,9 @@ export const useStore = create<AppState>()(
         workflows: state.workflows,
         agents: state.agents,
         channels: state.channels,
+        defaultModelId: state.defaultModelId,
+        routerEnabled: state.routerEnabled,
+        theme: state.theme,
         hosts: state.hosts,
         plugins: state.plugins,
         messages: state.messages,
