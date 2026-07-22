@@ -75,6 +75,30 @@ export async function fetchChannelModels(payload: {
   return data.models || [];
 }
 
+// 渠道连接测试 — 返回连通状态 + 延迟 + 模型信息
+export interface ChannelTestResult {
+  success: boolean;
+  latency: number;
+  model?: string;
+  modelCount?: number;
+  message: string;
+  status?: number;
+}
+
+export async function testChannelConnection(payload: {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+  model?: string;
+}): Promise<ChannelTestResult> {
+  const response = await fetch(`${API_BASE}/llm/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  return await response.json();
+}
+
 export async function chatLLM(options: LLMChatOptions): Promise<LLMChatResult> {
   const response = await fetch(`${API_BASE}/llm/chat`, {
     method: 'POST',

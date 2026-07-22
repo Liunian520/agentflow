@@ -750,6 +750,84 @@ router.post('/models', async (req: Request, res: Response) => {
   }
 });
 
+// 测试渠道连接 — 只做一次简单 chat completions 请求（1 token），验证 API Key + Base URL 是否正确
+router.post('/test', async (req: Request, res: Response) => {
+  try {
+    const { provider, apiKey, baseUrl, model } = req.body as { provider?: string; apiKey?: string; baseUrl?: string; model?: string };
+    if (!provider || !apiKey) {
+      return res.status(400).json({ success: false, message: '缺少 provider 或 apiKey' });
+    }
+
+    const startTime = Date.now();
+
+    // 用最小请求测试连通性
+    const testModel = model || 'gpt-4o-mini';
+    const testMessages = [{ role: 'user', content: 'Hi' }];
+
+    if (provider === 'anthropic') {
+      // Anthropic：发一条极短请求
+      const anthropicModel = model || 'claude-3-5-haiku-latest';
+      const anthropicUrl = 'https://api.anthropic.com/v1/messages';
+      const resp = await fetch(anthropicUrl, {
+        method: 'POST',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ model: anthropicModel, max_tokens: 1, messages: testMessages }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const latency = Date.now() - startTime;
+      if (resp.ok) {
+        res.json({ success: true, latency, model: anthropicModel, message: `连接成功！延迟 ${latency}ms` });
+      } else {
+        const txt = await resp.text().catch(() => '');
+        res.json({ success: false, latency, status: resp.status, message: `Anthropic 返回 ${resp.status}: ${txt.slice(0, 200)}` });
+      }
+    } else if (provider === 'google') {
+      // Google：用 models list 测试（更轻量）
+      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+      const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const latency = Date.now() - startTime;
+      if (resp.ok) {
+        const data = await resp.json();
+        const count = (data.models || []).length;
+        res.json({ success: true, latency, model: 'gemini-2.0-flash', modelCount: count, message: `连接成功！发现 ${count} 个模型，延迟 ${latency}ms` });
+      } else {
+        const txt = await resp.text().catch(() => '');
+        res.json({ success: false, latency, status: resp.status, message: `Google 返回 ${resp.status}: ${txt.slice(0, 200)}` });
+      }
+    } else {
+      // OpenAI 兼容（openai / deepseek / azure / custom）
+      const cleanBase = (baseUrl || '').replace(/\/+$/, '');
+      if (!cleanBase) {
+        return res.json({ success: false, message: '自定义/Azure 提供商需要填写 Base URL' });
+      }
+      const chatUrl = `${cleanBase}/chat/completions`;
+      const resp = await fetch(chatUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model: testModel, max_tokens: 1, messages: testMessages }),
+        signal: AbortSignal.timeout(10000),
+      });
+      const latency = Date.now() - startTime;
+      if (resp.ok) {
+        res.json({ success: true, latency, model: testModel, message: `连接成功！延迟 ${latency}ms` });
+      } else {
+        const txt = await resp.text().catch(() => '');
+        res.json({ success: false, latency, status: resp.status, message: `API 返回 ${resp.status}: ${txt.slice(0, 200)}` });
+      }
+    }
+  } catch (err: any) {
+    const latency = Date.now() - (req.body?._start || Date.now());
+    res.json({ success: false, latency, message: err.message || '连接测试失败' });
+  }
+});
+
 // ===== 主路由 =====
 
 // 非流式聊天

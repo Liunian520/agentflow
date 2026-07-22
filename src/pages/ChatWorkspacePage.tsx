@@ -1496,9 +1496,9 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
   // ===== 渲染消息内容 =====
 
   const renderMessageContent = (msg: ChatMessage) => {
-    // 操作确认卡片
+    // 操作确认卡片 — 最后一条 assistant 消息且待审批时，只显示审批提示
     if (pendingApproval && msg.id === activeMessages[activeMessages.length - 1]?.id && msg.role === 'assistant') {
-      // 不重复渲染
+      return <ApprovalPrompt request={pendingApproval.request} onApprove={handleApprove} onReject={handleReject} />;
     }
 
     if (msg.messageType === 'agent_card' && msg.metadata?.agent) {

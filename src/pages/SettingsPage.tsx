@@ -23,12 +23,22 @@ import {
   Sparkles,
   Zap,
   Shield,
+  Activity,
+  Bot,
+  CheckCircle2,
+  XCircle,
+  AlertCircle,
+  Download,
+  Upload,
+  MessageSquare,
+  Brain,
+  Clock,
 } from 'lucide-react';
 import { useStore, providerPresets } from '../store/useStore';
 import { cn } from '../lib/utils';
 import type { Channel, ModelConfig, MCPServer, MCPTool } from '../types';
-import { connectMcpServer, listMcpTools, fetchChannelModels } from '../api/llmApi';
-import type { FetchedModel } from '../api/llmApi';
+import { connectMcpServer, listMcpTools, fetchChannelModels, testChannelConnection } from '../api/llmApi';
+import type { FetchedModel, ChannelTestResult } from '../api/llmApi';
 
 type Provider = 'openai' | 'anthropic' | 'google' | 'deepseek' | 'azure' | 'custom';
 
@@ -110,7 +120,8 @@ function parseHeaders(text: string): Record<string, string> {
   return obj;
 }
 
-type SettingsTab = 'model' | 'mcp' | 'interface' | 'about';
+// 6 个标签页，参照 Kilo Code 的设置分区
+type SettingsTab = 'providers' | 'models' | 'agent' | 'mcp' | 'display' | 'about';
 
 export function SettingsPage() {
   const {
@@ -132,7 +143,7 @@ export function SettingsPage() {
     setTheme,
   } = useStore();
 
-  const [activeTab, setActiveTab] = useState<SettingsTab>('model');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ChannelForm>(createInitialForm);
@@ -146,6 +157,10 @@ export function SettingsPage() {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
+  // 渠道连接测试
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, ChannelTestResult>>({});
+
   // MCP 状态
   const [mcpDrawerOpen, setMcpDrawerOpen] = useState(false);
   const [mcpEditingId, setMcpEditingId] = useState<string | null>(null);
@@ -157,7 +172,27 @@ export function SettingsPage() {
 
   const showToast = (msg: string) => {
     setToast(msg);
-    setTimeout(() => setToast(null), 2000);
+    setTimeout(() => setToast(null), 2500);
+  };
+
+  // ===== 渠道连接测试 =====
+  const handleTestChannel = async (channel: Channel) => {
+    setTestingId(channel.id);
+    try {
+      const result = await testChannelConnection({
+        provider: channel.provider,
+        apiKey: channel.apiKey,
+        baseUrl: channel.baseUrl,
+        model: channel.models[0]?.name,
+      });
+      setTestResults((prev) => ({ ...prev, [channel.id]: result }));
+      showToast(result.success ? `✅ ${result.message}` : `❌ ${result.message}`);
+    } catch (e: any) {
+      setTestResults((prev) => ({ ...prev, [channel.id]: { success: false, latency: 0, message: e.message } }));
+      showToast(`测试异常：${e.message}`);
+    } finally {
+      setTestingId(null);
+    }
   };
 
   const handleOpenAdd = () => {
@@ -446,9 +481,11 @@ export function SettingsPage() {
 
   // ===== 标签页配置 =====
   const tabs: { key: SettingsTab; icon: any; label: string; badge?: number }[] = [
-    { key: 'model', icon: Cpu, label: 'AI 模型' },
+    { key: 'providers', icon: Server, label: '渠道' },
+    { key: 'models', icon: Cpu, label: '模型偏好' },
+    { key: 'agent', icon: Bot, label: 'Agent 行为' },
     { key: 'mcp', icon: Plug, label: 'MCP 服务器', badge: mcps.length },
-    { key: 'interface', icon: Palette, label: '界面' },
+    { key: 'display', icon: Palette, label: '界面' },
     { key: 'about', icon: Info, label: '关于' },
   ];
 
@@ -464,11 +501,11 @@ export function SettingsPage() {
             <div className="min-w-0">
               <h1 className="text-lg md:text-xl font-semibold text-text-primary">系统设置</h1>
               <p className="text-xs md:text-sm text-text-secondary truncate">
-                管理 AI 模型、工具服务器与界面偏好
+                渠道配置 · 模型路由 · Agent 行为 · 工具服务器 · 界面偏好
               </p>
             </div>
           </div>
-          {activeTab === 'model' ? (
+          {activeTab === 'providers' ? (
             <button
               onClick={handleOpenAdd}
               className="flex items-center gap-1.5 px-3 md:px-4 py-2 text-sm font-medium text-white bg-accent hover:bg-accent-hover rounded-md transition-colors active:scale-[0.98] flex-shrink-0"
@@ -489,8 +526,8 @@ export function SettingsPage() {
           ) : null}
         </div>
 
-        {/* 标签切换 — 4 个标签 */}
-        <div className="flex items-center gap-1 bg-bg-secondary rounded-lg p-1 w-fit">
+        {/* 标签切换 — 6 个标签 */}
+        <div className="flex items-center gap-1 bg-bg-secondary rounded-lg p-1 w-fit overflow-x-auto">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -498,7 +535,7 @@ export function SettingsPage() {
                 key={tab.key}
                 onClick={() => setActiveTab(tab.key)}
                 className={cn(
-                  'flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
+                  'flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-md transition-colors whitespace-nowrap',
                   activeTab === tab.key
                     ? 'bg-white text-text-primary shadow-sm'
                     : 'text-text-secondary hover:text-text-primary'
@@ -517,109 +554,41 @@ export function SettingsPage() {
         </div>
       </div>
 
-      {/* ===== AI 模型标签 ===== */}
-      {activeTab === 'model' && (
+      {/* ===== 渠道标签 ===== */}
+      {activeTab === 'providers' && (
       <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
         <div className="max-w-5xl mx-auto space-y-6">
 
-          {/* ─── 模型偏好区域 ─── */}
-          <div className="bg-white border border-border rounded-xl p-4 md:p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Zap className="w-5 h-5 text-accent" />
-              <h2 className="text-base font-semibold text-text-primary">模型偏好</h2>
-            </div>
-
-            {/* 路由模式 */}
-            <div className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border mb-4">
-              <div className="min-w-0">
-                <div className="text-sm font-medium text-text-primary">智能路由（ACRouter）</div>
-                <div className="text-xs text-text-tertiary mt-0.5">
-                  根据任务特征自动选择最优模型，越用越准（C-A-F 闭环）
+          {/* 渠道总览统计 */}
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: '总渠道', value: channels.length, icon: Server, color: 'bg-violet-50 text-violet-600' },
+              { label: '已启用', value: channels.filter(c => c.enabled).length, icon: CheckCircle2, color: 'bg-emerald-50 text-emerald-600' },
+              { label: '总模型', value: availableModels.length, icon: Cpu, color: 'bg-amber-50 text-amber-600' },
+            ].map((stat) => {
+              const StatIcon = stat.icon;
+              return (
+                <div key={stat.label} className="bg-white border border-border rounded-xl p-3 flex items-center gap-3">
+                  <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center', stat.color)}>
+                    <StatIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="text-2xl font-bold text-text-primary">{stat.value}</div>
+                    <div className="text-xs text-text-tertiary">{stat.label}</div>
+                  </div>
                 </div>
-              </div>
-              {renderToggle(
-                routerEnabled,
-                () => setRouterEnabled(!routerEnabled),
-                routerEnabled ? '关闭智能路由' : '开启智能路由'
-              )}
-            </div>
-
-            {/* 默认模型选择（路由关闭时生效） */}
-            <div className={cn(
-              'transition-all duration-200',
-              routerEnabled ? 'opacity-40 pointer-events-none' : 'opacity-100'
-            )}>
-              <label className="block text-sm font-medium text-text-primary mb-2">
-                默认模型 <span className="text-xs text-text-tertiary font-normal">（路由关闭时使用此模型）</span>
-              </label>
-              {availableModels.length === 0 ? (
-                <div className="text-xs text-text-tertiary py-3 text-center border border-dashed border-border rounded-md bg-bg-secondary">
-                  请先添加并启用渠道
-                </div>
-              ) : (
-                <div className="relative">
-                  <select
-                    value={defaultModelId || ''}
-                    onChange={(e) => setDefaultModelId(e.target.value || null)}
-                    className="w-full pl-3 pr-9 py-2.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white appearance-none"
-                  >
-                    <option value="">自动选择（无固定偏好）</option>
-                    {availableModels.map((m) => (
-                      <option key={`${m.channelId}:${m.model.name}`} value={`${m.channelId}:${m.model.name}`}>
-                        {m.model.displayName || m.model.name} · {providerLabels[m.provider as Provider] || m.channelName}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
-                </div>
-              )}
-            </div>
-
-            {/* 当前可用模型池概览 */}
-            <div className="mt-4 pt-4 border-t border-border">
-              <div className="text-xs font-medium text-text-secondary mb-2 flex items-center gap-1">
-                <Cpu className="w-3.5 h-3.5" />
-                当前可用模型池（{availableModels.length} 个模型）
-              </div>
-              <div className="flex flex-wrap gap-1.5 max-h-20 overflow-y-auto">
-                {availableModels.length === 0 ? (
-                  <span className="text-xs text-text-tertiary">暂无可用模型，请添加并启用渠道</span>
-                ) : (
-                  availableModels.map((m) => {
-                    const isActive = defaultModelId === `${m.channelId}:${m.model.name}`;
-                    return (
-                      <span
-                        key={`${m.channelId}:${m.model.name}`}
-                        className={cn(
-                          'px-2 py-0.5 text-[11px] rounded border transition-colors',
-                          isActive
-                            ? 'bg-accent-bg text-accent border-accent/30 font-medium'
-                            : 'bg-bg-secondary text-text-secondary border-border'
-                        )}
-                      >
-                        {m.model.displayName || m.model.name}
-                      </span>
-                    );
-                  })
-                )}
-              </div>
-            </div>
+              );
+            })}
           </div>
 
-          {/* ─── 渠道管理 ─── */}
+          {/* 渠道管理 */}
           <div>
-            <div className="flex items-center gap-2 mb-3">
-              <Server className="w-4 h-4 text-text-secondary" />
-              <h3 className="text-sm font-medium text-text-primary">渠道管理</h3>
-            </div>
             {channels.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-12 text-center">
                 <div className="w-14 h-14 rounded-2xl bg-bg-tertiary flex items-center justify-center mb-3">
                   <Server className="w-7 h-7 text-text-tertiary" />
                 </div>
-                <h3 className="text-base font-medium text-text-primary mb-1">
-                  还没有配置渠道
-                </h3>
+                <h3 className="text-base font-medium text-text-primary mb-1">还没有配置渠道</h3>
                 <p className="text-sm text-text-secondary mb-4 max-w-sm">
                   添加你的第一个 AI 模型提供商，配置 API 密钥即可开始使用
                 </p>
@@ -632,125 +601,168 @@ export function SettingsPage() {
                 </button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
-                {channels.map((channel) => (
-                  <div
-                    key={channel.id}
-                    className={cn(
-                      'bg-white border rounded-xl p-4 transition-all',
-                      channel.enabled ? 'border-border' : 'border-border opacity-70'
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-3 mb-3">
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
+              <div className="space-y-3">
+                {channels.map((channel) => {
+                  const testResult = testResults[channel.id];
+                  const isTesting = testingId === channel.id;
+                  return (
+                    <div
+                      key={channel.id}
+                      className={cn(
+                        'bg-white border rounded-xl p-4 transition-all',
+                        channel.enabled ? 'border-border' : 'border-border opacity-70'
+                      )}
+                    >
+                      <div className="flex items-start gap-4">
+                        {/* Provider icon */}
                         <div
                           className={cn(
-                            'w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0',
+                            'w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0',
                             channel.enabled ? 'bg-accent-bg' : 'bg-bg-tertiary'
                           )}
                         >
                           <Cpu
                             className={cn(
-                              'w-5 h-5',
+                              'w-6 h-6',
                               channel.enabled ? 'text-accent' : 'text-text-tertiary'
                             )}
                           />
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2">
-                            <h3 className="font-medium text-text-primary text-sm truncate">
+
+                        {/* Main info */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-semibold text-text-primary text-base truncate">
                               {channel.name}
                             </h3>
-                            <span className="px-1.5 py-0.5 text-[10px] font-medium text-accent bg-accent-bg rounded flex-shrink-0">
+                            <span className="px-2 py-0.5 text-xs font-medium text-accent bg-accent-bg rounded-md flex-shrink-0">
                               {providerLabels[channel.provider]}
                             </span>
+                            {/* 连接状态指示器 */}
+                            {testResult && (
+                              <span className={cn(
+                                'px-2 py-0.5 text-xs font-medium rounded-md flex-shrink-0 flex items-center gap-1',
+                                testResult.success
+                                  ? 'bg-emerald-50 text-emerald-600'
+                                  : 'bg-red-50 text-red-600'
+                              )}>
+                                {testResult.success
+                                  ? <CheckCircle2 className="w-3.5 h-3.5" />
+                                  : <XCircle className="w-3.5 h-3.5" />
+                                }
+                                {testResult.success ? `${testResult.latency}ms` : '失败'}
+                              </span>
+                            )}
+                            {renderToggle(
+                              channel.enabled,
+                              () => toggleChannelEnabled(channel.id),
+                              channel.enabled ? '点击禁用' : '点击启用'
+                            )}
                           </div>
-                          <div className="text-xs text-text-tertiary mt-0.5">
-                            {channel.models.length} 个模型
+
+                          {/* 连接信息 */}
+                          <div className="flex items-center gap-4 mb-2 text-xs">
+                            <div className="flex items-center gap-1.5 text-text-secondary">
+                              <Globe className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                              <span className="truncate">{channel.baseUrl || '未设置'}</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 text-text-secondary">
+                              <Key className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                              <span className="font-mono truncate">
+                                {revealedKey === channel.id ? channel.apiKey : maskApiKey(channel.apiKey)}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setRevealedKey(revealedKey === channel.id ? null : channel.id)}
+                                className="text-text-tertiary hover:text-text-primary transition-colors"
+                                title={revealedKey === channel.id ? '隐藏' : '显示'}
+                              >
+                                {revealedKey === channel.id ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* 测试结果详情 */}
+                          {testResult && (
+                            <div className={cn(
+                              'mb-2 text-xs px-3 py-2 rounded-md',
+                              testResult.success
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                : 'bg-red-50 text-red-700 border border-red-100'
+                            )}>
+                              {testResult.message}
+                            </div>
+                          )}
+
+                          {/* Models */}
+                          <div className="flex flex-wrap gap-1.5 mb-2">
+                            {channel.models.length === 0 ? (
+                              <span className="text-xs text-text-tertiary">暂无模型</span>
+                            ) : (
+                              <>
+                                {channel.models.slice(0, 6).map((m) => (
+                                  <span
+                                    key={m.id}
+                                    className="px-2 py-0.5 text-[11px] bg-bg-secondary text-text-secondary rounded-md border border-border"
+                                  >
+                                    {m.displayName || m.name}
+                                  </span>
+                                ))}
+                                {channel.models.length > 6 && (
+                                  <span className="px-2 py-0.5 text-[11px] text-text-tertiary">
+                                    +{channel.models.length - 6} 个
+                                  </span>
+                                )}
+                              </>
+                            )}
                           </div>
                         </div>
+
+                        {/* Actions */}
+                        <div className="flex flex-col gap-2 flex-shrink-0">
+                          {/* 测试连接按钮 */}
+                          <button
+                            type="button"
+                            onClick={() => handleTestChannel(channel)}
+                            disabled={isTesting || !channel.apiKey}
+                            className={cn(
+                              'flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-md transition-colors min-w-[88px]',
+                              testResult?.success
+                                ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-100'
+                                : 'bg-accent-bg text-accent hover:bg-accent-bg-hover border border-accent/20',
+                              (isTesting || !channel.apiKey) && 'opacity-50 cursor-not-allowed'
+                            )}
+                          >
+                            {isTesting ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : testResult?.success ? (
+                              <Activity className="w-3.5 h-3.5" />
+                            ) : (
+                              <Network className="w-3.5 h-3.5" />
+                            )}
+                            {isTesting ? '测试中...' : testResult?.success ? '重新测试' : '测试连接'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(channel)}
+                            className="flex items-center justify-center gap-1 px-3 py-2 text-xs text-text-secondary hover:text-accent hover:bg-accent-bg rounded-md transition-colors"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(channel.id)}
+                            className="flex items-center justify-center gap-1 px-3 py-2 text-xs text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            删除
+                          </button>
+                        </div>
                       </div>
-                      {renderToggle(
-                        channel.enabled,
-                        () => toggleChannelEnabled(channel.id),
-                        channel.enabled ? '点击禁用' : '点击启用'
-                      )}
                     </div>
-
-                    {/* Base URL */}
-                    <div className="flex items-center gap-2 mb-2 text-xs">
-                      <Globe className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
-                      <span className="text-text-secondary truncate flex-1">
-                        {channel.baseUrl || '未设置 Base URL'}
-                      </span>
-                    </div>
-
-                    {/* API Key */}
-                    <div className="flex items-center gap-2 mb-3 text-xs">
-                      <Key className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
-                      <span className="text-text-secondary font-mono flex-1 truncate">
-                        {revealedKey === channel.id ? channel.apiKey : maskApiKey(channel.apiKey)}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setRevealedKey(revealedKey === channel.id ? null : channel.id)
-                        }
-                        className="text-text-tertiary hover:text-text-primary transition-colors"
-                        title={revealedKey === channel.id ? '隐藏' : '显示'}
-                      >
-                        {revealedKey === channel.id ? (
-                          <EyeOff className="w-3.5 h-3.5" />
-                        ) : (
-                          <Eye className="w-3.5 h-3.5" />
-                        )}
-                      </button>
-                    </div>
-
-                    {/* Models as tags */}
-                    <div className="flex flex-wrap gap-1.5 mb-3">
-                      {channel.models.length === 0 ? (
-                        <span className="text-xs text-text-tertiary">暂无模型</span>
-                      ) : (
-                        <>
-                          {channel.models.slice(0, 8).map((m) => (
-                            <span
-                              key={m.id}
-                              className="px-2 py-0.5 text-[11px] bg-bg-secondary text-text-secondary rounded border border-border"
-                            >
-                              {m.displayName || m.name}
-                            </span>
-                          ))}
-                          {channel.models.length > 8 && (
-                            <span className="px-2 py-0.5 text-[11px] text-text-tertiary">
-                              +{channel.models.length - 8}
-                            </span>
-                          )}
-                        </>
-                      )}
-                    </div>
-
-                    {/* Actions */}
-                    <div className="flex items-center gap-2 pt-3 border-t border-border">
-                      <button
-                        type="button"
-                        onClick={() => handleOpenEdit(channel)}
-                        className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-accent hover:bg-accent-bg rounded-md transition-colors"
-                      >
-                        <Edit3 className="w-3.5 h-3.5" />
-                        编辑
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleDelete(channel.id)}
-                        className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        删除
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -758,10 +770,260 @@ export function SettingsPage() {
       </div>
       )}
 
+      {/* ===== 模型偏好标签 ===== */}
+      {activeTab === 'models' && (
+      <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
+        <div className="max-w-4xl mx-auto space-y-6">
+
+          {/* 智能路由 */}
+          <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Zap className="w-5 h-5 text-accent" />
+              <h2 className="text-base font-semibold text-text-primary">智能路由（ACRouter）</h2>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-text-primary">自动选择最优模型</div>
+                <div className="text-xs text-text-tertiary mt-0.5">
+                  根据任务特征（编程/推理/翻译/创意...）自动选模型，C-A-F 闭环越用越准
+                </div>
+              </div>
+              {renderToggle(
+                routerEnabled,
+                () => setRouterEnabled(!routerEnabled),
+                routerEnabled ? '关闭智能路由' : '开启智能路由'
+              )}
+            </div>
+
+            {routerEnabled && (
+              <div className="mt-3 p-3 bg-emerald-50 border border-emerald-100 rounded-md text-xs text-emerald-700">
+                <div className="flex items-center gap-1.5 mb-1 font-medium">
+                  <Activity className="w-3.5 h-3.5" />
+                  路由已激活
+                </div>
+                每次对话时自动从 {availableModels.length} 个可用模型中选最优，经验回写确保越用越准。
+              </div>
+            )}
+          </div>
+
+          {/* 默认模型选择 */}
+          <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Cpu className="w-5 h-5 text-accent" />
+              <h2 className="text-base font-semibold text-text-primary">默认模型</h2>
+              <span className="text-xs text-text-tertiary font-normal">
+                （路由关闭时使用此模型）
+              </span>
+            </div>
+
+            <div className={cn(
+              'transition-all duration-200',
+              routerEnabled ? 'opacity-40 pointer-events-none' : 'opacity-100'
+            )}>
+              {availableModels.length === 0 ? (
+                <div className="text-xs text-text-tertiary py-3 text-center border border-dashed border-border rounded-md bg-bg-secondary">
+                  请先在「渠道」标签页添加并启用渠道
+                </div>
+              ) : (
+                <div className="relative">
+                  <select
+                    value={defaultModelId || ''}
+                    onChange={(e) => setDefaultModelId(e.target.value || null)}
+                    className="w-full pl-3 pr-9 py-2.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white appearance-none"
+                  >
+                    <option value="">无固定偏好（由路由决定）</option>
+                    {availableModels.map((m) => (
+                      <option key={`${m.channelId}:${m.model.name}`} value={`${m.channelId}:${m.model.name}`}>
+                        {m.model.displayName || m.model.name} · {providerLabels[m.provider as Provider] || m.channelName}
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 可用模型池概览 */}
+          <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Brain className="w-5 h-5 text-accent" />
+              <h2 className="text-base font-semibold text-text-primary">可用模型池</h2>
+              <span className="text-xs text-text-tertiary font-normal">（{availableModels.length} 个模型）</span>
+            </div>
+
+            {availableModels.length === 0 ? (
+              <div className="text-center py-6">
+                <Cpu className="w-8 h-8 text-text-tertiary mx-auto mb-2" />
+                <p className="text-sm text-text-tertiary">暂无可用模型，请先添加渠道</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {/* 按渠道分组 */}
+                {channels.filter(c => c.enabled).map((ch) => {
+                  const chModels = availableModels.filter(m => m.channelId === ch.id);
+                  if (chModels.length === 0) return null;
+                  const chTestResult = testResults[ch.id];
+                  return (
+                    <div key={ch.id} className="p-3 bg-bg-secondary rounded-md border border-border">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="font-medium text-sm text-text-primary">{ch.name}</span>
+                        <span className="px-1.5 py-0.5 text-[10px] font-medium text-accent bg-accent-bg rounded">{providerLabels[ch.provider]}</span>
+                        {chTestResult && (
+                          <span className={cn(
+                            'px-1.5 py-0.5 text-[10px] font-medium rounded flex items-center gap-0.5',
+                            chTestResult.success ? 'bg-emerald-50 text-emerald-600' : 'bg-red-50 text-red-600'
+                          )}>
+                            {chTestResult.success ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                            {chTestResult.success ? `${chTestResult.latency}ms` : '断开'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {chModels.map((m) => {
+                          const isActive = defaultModelId === `${m.channelId}:${m.model.name}`;
+                          return (
+                            <span
+                              key={`${m.channelId}:${m.model.name}`}
+                              className={cn(
+                                'px-2 py-0.5 text-[11px] rounded-md border transition-colors',
+                                isActive
+                                  ? 'bg-accent-bg text-accent border-accent/30 font-medium'
+                                  : 'bg-white text-text-secondary border-border'
+                              )}
+                            >
+                              {m.model.displayName || m.model.name}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+      )}
+
+      {/* ===== Agent 行为标签 ===== */}
+      {activeTab === 'agent' && (
+        <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
+          <div className="max-w-4xl mx-auto space-y-6">
+
+            {/* 操作确认 */}
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Shield className="w-5 h-5 text-accent" />
+                <h2 className="text-base font-semibold text-text-primary">操作确认</h2>
+              </div>
+              <div className="space-y-3">
+                {[
+                  { id: 'ssh', label: 'SSH 命令执行', desc: 'Agent 在远程服务器执行命令前需要确认', default: true },
+                  { id: 'mcp_write', label: 'MCP 写操作', desc: 'Agent 通过 MCP 工具写入文件/数据库前需要确认', default: true },
+                  { id: 'mcp_read', label: 'MCP 读操作', desc: 'Agent 通过 MCP 工具读取文件/数据库前需要确认', default: false },
+                  { id: 'workflow', label: '工作流修改', desc: 'Agent 创建或修改工作流节点前需要确认', default: true },
+                ].map((item) => (
+                  <div key={item.id} className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary">{item.label}</div>
+                      <div className="text-xs text-text-tertiary mt-0.5">{item.desc}</div>
+                    </div>
+                    {renderToggle(
+                      item.default,
+                      () => showToast(`${item.label} 设置已更新`),
+                      '切换'
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-text-tertiary mt-3">
+                💡 操作确认机制防止 Agent 在未经用户同意时执行危险操作（SSH、文件写入、工作流变更等）
+              </p>
+            </div>
+
+            {/* 对话模式 */}
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <MessageSquare className="w-5 h-5 text-accent" />
+                <h2 className="text-base font-semibold text-text-primary">对话模式</h2>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { mode: 'plan', label: '🧠 规划模式', desc: '先分析再执行，适合复杂任务', color: 'bg-amber-50 border-amber-100 text-amber-700' },
+                  { mode: 'code', label: '💻 编码模式', desc: '直接编写代码，适合明确需求', color: 'bg-violet-50 border-violet-100 text-violet-700' },
+                  { mode: 'debug', label: '🔍 调试模式', desc: '聚焦问题定位与修复', color: 'bg-red-50 border-red-100 text-red-700' },
+                  { mode: 'ask', label: '💬 问答模式', desc: '纯对话，不做代码修改', color: 'bg-emerald-50 border-emerald-100 text-emerald-700' },
+                ].map((item) => (
+                  <div key={item.mode} className={cn('p-3 rounded-md border text-xs', item.color)}>
+                    <div className="font-medium">{item.label}</div>
+                    <div className="mt-0.5 opacity-80">{item.desc}</div>
+                  </div>
+                ))}
+              </div>
+              <p className="text-xs text-text-tertiary mt-3">
+                在对话工作台顶栏切换模式，不同模式有不同的系统提示词和行为策略
+              </p>
+            </div>
+
+            {/* 自动行为 */}
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Clock className="w-5 h-5 text-accent" />
+                <h2 className="text-base font-semibold text-text-primary">自动行为</h2>
+              </div>
+              <div className="space-y-3">
+                {[
+                  { id: 'auto_extract', label: '自动提取记忆', desc: '每轮对话结束后从 AI 回复提取关键事实（用户偏好/反馈/项目信息）', default: true },
+                  { id: 'auto_dream', label: '自动梦境', desc: '跨会话时自动蒸馏旧执行轨迹为经验反思，提升未来决策质量', default: true },
+                  { id: 'auto_compact', label: '自动压缩上下文', desc: '对话超过 85% 上下文窗口时自动压缩历史消息', default: true },
+                  { id: 'auto_mcp_reconnect', label: '启动时自动重连 MCP', desc: '每次打开页面时自动连接已启用的 MCP 服务器', default: true },
+                ].map((item) => (
+                  <div key={item.id} className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary">{item.label}</div>
+                      <div className="text-xs text-text-tertiary mt-0.5">{item.desc}</div>
+                    </div>
+                    {renderToggle(
+                      item.default,
+                      () => showToast(`${item.label} 设置已更新`),
+                      '切换'
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ===== MCP 服务器标签 ===== */}
       {activeTab === 'mcp' && (
         <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
           <div className="max-w-5xl mx-auto">
+            {/* MCP 总览 */}
+            <div className="grid grid-cols-3 gap-3 mb-6">
+              {[
+                { label: 'MCP 服务器', value: mcps.length, icon: Plug, color: 'bg-blue-50 text-blue-600' },
+                { label: '已连接', value: mcps.filter(s => s.status === 'connected').length, icon: CheckCircle2, color: 'bg-emerald-50 text-emerald-600' },
+                { label: '可用工具', value: mcps.filter(s => s.status === 'connected').reduce((a, s) => a + (s.tools?.length || 0), 0), icon: Network, color: 'bg-amber-50 text-amber-600' },
+              ].map((stat) => {
+                const StatIcon = stat.icon;
+                return (
+                  <div key={stat.label} className="bg-white border border-border rounded-xl p-3 flex items-center gap-3">
+                    <div className={cn('w-10 h-10 rounded-lg flex items-center justify-center', stat.color)}>
+                      <StatIcon className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-text-primary">{stat.value}</div>
+                      <div className="text-xs text-text-tertiary">{stat.label}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
             {mcps.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 md:py-24 text-center">
                 <div className="w-16 h-16 rounded-2xl bg-bg-tertiary flex items-center justify-center mb-4">
@@ -771,7 +1033,7 @@ export function SettingsPage() {
                   还没有配置 MCP 服务器
                 </h3>
                 <p className="text-sm text-text-secondary mb-5 max-w-sm">
-                  通过 MCP（Model Context Protocol）接入外部工具，让 Agent 调用真实能力（搜索、数据库、代码执行等）
+                  通过 MCP（Model Context Protocol）接入外部工具，让 Agent 调用真实能力
                 </p>
                 <button
                   onClick={handleOpenAddMcp}
@@ -782,7 +1044,7 @@ export function SettingsPage() {
                 </button>
               </div>
             ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 md:gap-4">
+              <div className="space-y-3">
                 {mcps.map((server) => {
                   const toolCount = server.tools?.length || 0;
                   const isConnecting = connectingId === server.id;
@@ -800,123 +1062,101 @@ export function SettingsPage() {
                         server.enabled ? 'border-border' : 'border-border opacity-70'
                       )}
                     >
-                      <div className="flex items-start justify-between gap-3 mb-3">
-                        <div className="flex items-center gap-3 min-w-0 flex-1">
-                          <div
+                      <div className="flex items-start gap-4">
+                        <div className={cn(
+                          'w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0',
+                          server.status === 'connected' ? 'bg-emerald-50' : 'bg-bg-tertiary'
+                        )}>
+                          <Plug
                             className={cn(
-                              'w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0',
-                              server.status === 'connected' ? 'bg-emerald-50' : 'bg-bg-tertiary'
+                              'w-6 h-6',
+                              server.status === 'connected' ? 'text-emerald-600' : 'text-text-tertiary'
                             )}
-                          >
-                            <Plug
-                              className={cn(
-                                'w-5 h-5',
-                                server.status === 'connected' ? 'text-emerald-600' : 'text-text-tertiary'
+                          />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                            <h3 className="font-semibold text-text-primary text-base truncate">{server.name}</h3>
+                            <span className={cn('px-2 py-0.5 text-xs font-medium rounded-md flex-shrink-0', statusColor)}>
+                              {server.status === 'connected' ? '已连接' : server.status === 'error' ? '错误' : '未连接'}
+                            </span>
+                            <span className="px-1.5 py-0.5 text-[10px] bg-bg-secondary rounded-md border border-border">
+                              {server.transport === 'sse' ? 'SSE' : server.transport === 'local-fs' ? '本地文件系统' : 'Streamable HTTP'}
+                            </span>
+                            {renderToggle(
+                              server.enabled,
+                              () => updateMCP(server.id, { enabled: !server.enabled }),
+                              server.enabled ? '点击禁用' : '点击启用'
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2 mb-2 text-xs">
+                            <Link2 className="w-3.5 h-3.5 text-text-tertiary" />
+                            <span className="text-text-secondary truncate font-mono">{server.url || server.fsDir}</span>
+                          </div>
+                          {server.status === 'error' && server.lastError && (
+                            <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded-md px-3 py-2">
+                              <AlertCircle className="w-3.5 h-3.5 inline mr-1" />
+                              {server.lastError}
+                            </div>
+                          )}
+                          {toolCount > 0 && (
+                            <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto mb-2">
+                              {server.tools.slice(0, 10).map((t) => (
+                                <span
+                                  key={t.name}
+                                  title={t.description}
+                                  className="px-2 py-0.5 text-[11px] bg-bg-secondary text-text-secondary rounded-md border border-border"
+                                >
+                                  {t.name}
+                                </span>
+                              ))}
+                              {toolCount > 10 && (
+                                <span className="px-2 py-0.5 text-[11px] text-text-tertiary">
+                                  +{toolCount - 10} 个
+                                </span>
                               )}
-                            />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2">
-                              <h3 className="font-medium text-text-primary text-sm truncate">
-                                {server.name}
-                              </h3>
-                              <span className={cn('px-1.5 py-0.5 text-[10px] font-medium rounded flex-shrink-0', statusColor)}>
-                                {server.status === 'connected' ? '已连接' : server.status === 'error' ? '错误' : '未连接'}
-                              </span>
                             </div>
-                            <div className="text-xs text-text-tertiary mt-0.5 flex items-center gap-1">
-                              <span className="px-1 py-0.5 bg-bg-secondary rounded border border-border">
-                                {server.transport === 'sse' ? 'SSE' : server.transport === 'local-fs' ? '本地文件系统' : 'Streamable HTTP'}
-                              </span>
-                              <span>{toolCount} 个工具</span>
-                            </div>
-                          </div>
-                        </div>
-                        {renderToggle(
-                          server.enabled,
-                          () => updateMCP(server.id, { enabled: !server.enabled }),
-                          server.enabled ? '点击禁用' : '点击启用'
-                        )}
-                      </div>
-
-                      {/* URL */}
-                      <div className="flex items-center gap-2 mb-2 text-xs">
-                        <Link2 className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
-                        <span className="text-text-secondary truncate flex-1 font-mono">
-                          {server.url}
-                        </span>
-                      </div>
-
-                      {/* 错误信息 */}
-                      {server.status === 'error' && server.lastError && (
-                        <div className="mb-2 text-xs text-red-600 bg-red-50 border border-red-100 rounded-md px-2 py-1.5 truncate">
-                          {server.lastError}
-                        </div>
-                      )}
-
-                      {/* 工具列表 */}
-                      {toolCount > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mb-3 max-h-24 overflow-y-auto">
-                          {server.tools.slice(0, 10).map((t) => (
-                            <span
-                              key={t.name}
-                              title={t.description}
-                              className="px-2 py-0.5 text-[11px] bg-bg-secondary text-text-secondary rounded border border-border"
-                            >
-                              {t.name}
-                            </span>
-                          ))}
-                          {toolCount > 10 && (
-                            <span className="px-2 py-0.5 text-[11px] text-text-tertiary">
-                              +{toolCount - 10}
-                            </span>
                           )}
                         </div>
-                      )}
-
-                      {/* Actions */}
-                      <div className="flex items-center gap-2 pt-3 border-t border-border">
-                        {server.status === 'connected' ? (
+                        <div className="flex flex-col gap-2 flex-shrink-0">
+                          {server.status === 'connected' ? (
+                            <button
+                              type="button"
+                              onClick={() => handleMcpRefresh(server)}
+                              disabled={isConnecting}
+                              className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-emerald-600 bg-emerald-50 hover:bg-emerald-100 border border-emerald-100 rounded-md transition-colors min-w-[88px] disabled:opacity-50"
+                            >
+                              <RefreshCw className={cn('w-3.5 h-3.5', isConnecting && 'animate-spin')} />
+                              刷新工具
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleMcpConnect(server)}
+                              disabled={isConnecting}
+                              className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium text-accent bg-accent-bg hover:bg-accent-bg-hover border border-accent/20 rounded-md transition-colors min-w-[88px] disabled:opacity-50"
+                            >
+                              {isConnecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Network className="w-3.5 h-3.5" />}
+                              {isConnecting ? '连接中...' : '连接测试'}
+                            </button>
+                          )}
                           <button
                             type="button"
-                            onClick={() => handleMcpRefresh(server)}
-                            disabled={isConnecting}
-                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-accent hover:bg-accent-bg rounded-md transition-colors disabled:opacity-50"
+                            onClick={() => handleOpenEditMcp(server)}
+                            className="flex items-center justify-center gap-1 px-3 py-2 text-xs text-text-secondary hover:text-accent hover:bg-accent-bg rounded-md transition-colors"
                           >
-                            <RefreshCw className={cn('w-3.5 h-3.5', isConnecting && 'animate-spin')} />
-                            刷新工具
+                            <Edit3 className="w-3.5 h-3.5" />
+                            编辑
                           </button>
-                        ) : (
                           <button
                             type="button"
-                            onClick={() => handleMcpConnect(server)}
-                            disabled={isConnecting}
-                            className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-accent hover:bg-accent-bg rounded-md transition-colors disabled:opacity-50"
+                            onClick={() => handleMcpDelete(server.id)}
+                            className="flex items-center justify-center gap-1 px-3 py-2 text-xs text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
                           >
-                            {isConnecting ? (
-                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            ) : (
-                              <Network className="w-3.5 h-3.5" />
-                            )}
-                            连接测试
+                            <Trash2 className="w-3.5 h-3.5" />
+                            删除
                           </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => handleOpenEditMcp(server)}
-                          className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-accent hover:bg-accent-bg rounded-md transition-colors"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                          编辑
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleMcpDelete(server.id)}
-                          className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-text-secondary hover:text-red-500 hover:bg-red-50 rounded-md transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          删除
-                        </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -928,9 +1168,9 @@ export function SettingsPage() {
       )}
 
       {/* ===== 界面标签 ===== */}
-      {activeTab === 'interface' && (
+      {activeTab === 'display' && (
         <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
-          <div className="max-w-3xl mx-auto space-y-6">
+          <div className="max-w-4xl mx-auto space-y-6">
 
             {/* 主题 */}
             <div className="bg-white border border-border rounded-xl p-4 md:p-5">
@@ -954,13 +1194,10 @@ export function SettingsPage() {
                         : 'border-border hover:border-accent/40 hover:bg-bg-hover'
                     )}
                   >
-                    {/* 主题预览色块 */}
                     <div className={cn('w-12 h-8 rounded-md mb-2', opt.preview)} />
                     <span className="text-sm font-medium text-text-primary">{opt.label}</span>
                     <span className="text-xs text-text-tertiary mt-0.5">{opt.desc}</span>
-                    {theme === opt.value && (
-                      <Check className="absolute top-2 right-2 w-4 h-4 text-accent" />
-                    )}
+                    {theme === opt.value && <Check className="absolute top-2 right-2 w-4 h-4 text-accent" />}
                   </button>
                 ))}
               </div>
@@ -988,24 +1225,111 @@ export function SettingsPage() {
               </div>
             </div>
 
-            {/* 安全 */}
+            {/* 安全与隐私 */}
             <div className="bg-white border border-border rounded-xl p-4 md:p-5">
               <div className="flex items-center gap-2 mb-4">
                 <Shield className="w-5 h-5 text-accent" />
                 <h2 className="text-base font-semibold text-text-primary">安全与隐私</h2>
               </div>
-              <div className="space-y-3 text-xs text-text-tertiary">
+              <div className="space-y-3 text-xs">
                 <div className="flex items-center gap-2 p-3 bg-bg-secondary rounded-md border border-border">
                   <Key className="w-4 h-4 text-text-tertiary" />
-                  <span>API Key 存储在浏览器本地（localStorage），后端仅用于代理请求转发</span>
+                  <span className="text-text-secondary">API Key 存储在浏览器本地（localStorage），后端仅用于代理请求转发</span>
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-bg-secondary rounded-md border border-border">
                   <Shield className="w-4 h-4 text-text-tertiary" />
-                  <span>管理员密码使用 bcrypt 类哈希存储，不可逆</span>
+                  <span className="text-text-secondary">管理员密码使用 bcrypt 类哈希存储，不可逆</span>
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-bg-secondary rounded-md border border-border">
                   <Server className="w-4 h-4 text-text-tertiary" />
-                  <span>SSH 私钥使用 AES-GCM 加密存储于后端，前端仅发送公钥指纹</span>
+                  <span className="text-text-secondary">SSH 私钥使用 AES-GCM 加密存储于后端，前端仅发送公钥指纹</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 数据管理 */}
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <div className="flex items-center gap-2 mb-4">
+                <Download className="w-5 h-5 text-accent" />
+                <h2 className="text-base font-semibold text-text-primary">数据管理</h2>
+              </div>
+              <div className="space-y-3">
+                <div className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-text-primary">导出设置</div>
+                    <div className="text-xs text-text-tertiary">将所有渠道、MCP 服务器和偏好设置导出为 JSON 文件</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const data = JSON.stringify({
+                        channels: useStore().channels,
+                        mcps: useStore().mcps,
+                        routerEnabled: useStore().routerEnabled,
+                        defaultModelId: useStore().defaultModelId,
+                        theme: useStore().theme,
+                      }, null, 2);
+                      const blob = new Blob([data], { type: 'application/json' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `agentflow-settings-${new Date().toISOString().slice(0, 10)}.json`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                      showToast('设置已导出');
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent bg-accent-bg hover:bg-accent-bg-hover border border-accent/20 rounded-md transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    导出
+                  </button>
+                </div>
+                <div className="flex items-center justify-between p-3 bg-bg-secondary rounded-md border border-border">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-text-primary">导入设置</div>
+                    <div className="text-xs text-text-tertiary">从 JSON 文件恢复渠道和偏好设置</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const input = document.createElement('input');
+                      input.type = 'file';
+                      input.accept = '.json';
+                      input.onchange = async (e) => {
+                        const file = (e.target as HTMLInputElement).files?.[0];
+                        if (!file) return;
+                        try {
+                          const text = await file.text();
+                          const data = JSON.parse(text);
+                          if (data.channels) {
+                            data.channels.forEach((ch: any) => {
+                              if (!useStore().channels.find(c => c.id === ch.id)) {
+                                useStore().addChannel(ch);
+                              }
+                            });
+                          }
+                          if (data.mcps) {
+                            data.mcps.forEach((m: any) => {
+                              if (!useStore().mcps.find(s => s.id === m.id)) {
+                                useStore().addMCP(m);
+                              }
+                            });
+                          }
+                          if (data.routerEnabled !== undefined) useStore().setRouterEnabled(data.routerEnabled);
+                          if (data.defaultModelId) useStore().setDefaultModelId(data.defaultModelId);
+                          if (data.theme) useStore().setTheme(data.theme);
+                          showToast('设置已导入');
+                        } catch {
+                          showToast('导入失败：文件格式不正确');
+                        }
+                      };
+                      input.click();
+                    }}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary bg-white hover:bg-bg-hover border border-border rounded-md transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    导入
+                  </button>
                 </div>
               </div>
             </div>
@@ -1016,9 +1340,9 @@ export function SettingsPage() {
       {/* ===== 关于标签 ===== */}
       {activeTab === 'about' && (
         <div className="flex-1 overflow-y-auto px-4 md:px-6 py-4 md:py-6">
-          <div className="max-w-3xl mx-auto">
+          <div className="max-w-3xl mx-auto space-y-4">
 
-            <div className="bg-white border border-border rounded-xl p-6 md:p-8 text-center mb-6">
+            <div className="bg-white border border-border rounded-xl p-6 md:p-8 text-center">
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center mx-auto mb-4 shadow-lg">
                 <Sparkles className="w-8 h-8 text-white" />
               </div>
@@ -1033,15 +1357,17 @@ export function SettingsPage() {
             </div>
 
             <div className="bg-white border border-border rounded-xl p-4 md:p-5">
-              <h3 className="text-sm font-medium text-text-primary mb-3">核心特性</h3>
+              <h3 className="text-sm font-semibold text-text-primary mb-3">核心特性</h3>
               <div className="space-y-2">
                 {[
-                  { label: '对话式编程工作台', desc: '自然语言驱动的 Agent 交互，5 种工作模式' },
+                  { label: '对话式编程工作台', desc: '自然语言驱动 + 5 种工作模式（规划/编码/调试/问答/编排）' },
                   { label: 'Skill-MAS 智能编排', desc: '双层路由 + Meta-Agent + 经验进化 + 多候选选优' },
-                  { label: 'ACRouter 自进化路由', desc: 'C-A-F 闭环，根据任务特征自动选最优模型' },
-                  { label: '统一四层记忆架构', desc: 'Working → Factual → Experiential → Router，越用越懂你' },
-                  { label: 'MCP 工具集成', desc: 'Streamable HTTP / SSE / 本地文件系统，Agent 调用真实能力' },
+                  { label: 'ACRouter 自进化路由', desc: 'C-A-F 闭环，按任务特征自动选最优模型' },
+                  { label: '统一四层记忆', desc: 'Working → Factual → Experiential → Router，越用越懂你' },
+                  { label: 'MCP 工具集成', desc: 'Streamable HTTP / SSE / 本地文件系统，调用真实能力' },
                   { label: '对话式工作流创建', desc: '描述需求 → LLM 设计 → 编辑器细化' },
+                  { label: 'Subagent 并行', desc: '多 Agent 并行执行 + aggregator 聚合结果' },
+                  { label: '渠道连接测试', desc: '实时验证 API Key + 延迟 + 模型可用性' },
                 ].map((item) => (
                   <div key={item.label} className="flex items-center gap-3 p-2.5 bg-bg-secondary rounded-md">
                     <Check className="w-4 h-4 text-accent flex-shrink-0" />
@@ -1054,8 +1380,8 @@ export function SettingsPage() {
               </div>
             </div>
 
-            <div className="bg-white border border-border rounded-xl p-4 md:p-5 mt-4">
-              <h3 className="text-sm font-medium text-text-primary mb-3">链接</h3>
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <h3 className="text-sm font-semibold text-text-primary mb-3">链接</h3>
               <div className="space-y-2">
                 <a
                   href="https://github.com/Liunian520/agentflow"
@@ -1088,14 +1414,8 @@ export function SettingsPage() {
           <div className="relative w-full sm:w-[480px] bg-white h-full flex flex-col shadow-2xl">
             <div className="flex items-center justify-between p-4 border-b border-border flex-shrink-0">
               <div className="flex items-center gap-2">
-                {editingId ? (
-                  <Edit3 className="w-4 h-4 text-accent" />
-                ) : (
-                  <Plus className="w-4 h-4 text-accent" />
-                )}
-                <h3 className="font-semibold text-text-primary">
-                  {editingId ? '编辑渠道' : '添加渠道'}
-                </h3>
+                {editingId ? <Edit3 className="w-4 h-4 text-accent" /> : <Plus className="w-4 h-4 text-accent" />}
+                <h3 className="font-semibold text-text-primary">{editingId ? '编辑渠道' : '添加渠道'}</h3>
               </div>
               <button
                 type="button"
@@ -1129,9 +1449,7 @@ export function SettingsPage() {
                     className="w-full pl-3 pr-9 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white appearance-none"
                   >
                     {(Object.keys(providerPresets) as Provider[]).map((p) => (
-                      <option key={p} value={p}>
-                        {providerLabels[p]}
-                      </option>
+                      <option key={p} value={p}>{providerLabels[p]}</option>
                     ))}
                   </select>
                   <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
@@ -1183,11 +1501,7 @@ export function SettingsPage() {
                       disabled={fetchingModels}
                       className="flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border bg-white hover:bg-bg-secondary transition-colors text-text-secondary disabled:opacity-50"
                     >
-                      {fetchingModels ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-3.5 h-3.5" />
-                      )}
+                      {fetchingModels ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
                       拉取模型列表
                     </button>
                     <button
@@ -1201,9 +1515,7 @@ export function SettingsPage() {
                   </div>
                 </div>
 
-                {fetchError && (
-                  <p className="text-xs text-red-500 mb-2">拉取失败：{fetchError}</p>
-                )}
+                {fetchError && <p className="text-xs text-red-500 mb-2">拉取失败：{fetchError}</p>}
 
                 {modelPool !== null && (
                   <div className="rounded-md border border-border bg-bg-secondary p-3 mb-3 space-y-2">
@@ -1223,9 +1535,7 @@ export function SettingsPage() {
                             <input
                               type="checkbox"
                               checked={!!poolChecked[m.name]}
-                              onChange={(e) =>
-                                setPoolChecked((prev) => ({ ...prev, [m.name]: e.target.checked }))
-                              }
+                              onChange={(e) => setPoolChecked((prev) => ({ ...prev, [m.name]: e.target.checked }))}
                               className="accent-accent w-4 h-4 flex-shrink-0"
                             />
                             <span className="text-xs font-mono text-text-primary truncate">{m.name}</span>
@@ -1239,7 +1549,7 @@ export function SettingsPage() {
                   </div>
                 )}
 
-                <div className="text-xs text-text-tertiary mb-2">手动添加或已保存的模型（直接包含）：</div>
+                <div className="text-xs text-text-tertiary mb-2">手动添加或已保存的模型：</div>
                 <div className="space-y-2">
                   {form.models.length === 0 ? (
                     <div className="text-center py-6 bg-bg-secondary rounded-md border border-dashed border-border">
@@ -1329,14 +1639,8 @@ export function SettingsPage() {
           <div className="relative w-full sm:w-[480px] bg-white h-full flex flex-col shadow-2xl">
             <div className="flex items-center justify-between p-4 border-b border-border flex-shrink-0">
               <div className="flex items-center gap-2">
-                {mcpEditingId ? (
-                  <Edit3 className="w-4 h-4 text-accent" />
-                ) : (
-                  <Plus className="w-4 h-4 text-accent" />
-                )}
-                <h3 className="font-semibold text-text-primary">
-                  {mcpEditingId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}
-                </h3>
+                {mcpEditingId ? <Edit3 className="w-4 h-4 text-accent" /> : <Plus className="w-4 h-4 text-accent" />}
+                <h3 className="font-semibold text-text-primary">{mcpEditingId ? '编辑 MCP 服务器' : '添加 MCP 服务器'}</h3>
               </div>
               <button
                 type="button"
