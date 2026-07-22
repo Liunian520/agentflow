@@ -187,11 +187,14 @@ async function callOpenAIFormat(
 // ===== Anthropic 格式适配 =====
 async function callAnthropicFormat(
   apiKey: string,
+  baseUrl: string,
   body: Record<string, any>,
   stream: boolean,
   res?: Response
 ): Promise<string | void> {
-  const url = 'https://api.anthropic.com/v1/messages';
+  // 拼接 Anthropic messages 端点，避免双重 /v1
+  const cleanBase = baseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '') || 'https://api.anthropic.com';
+  const url = `${cleanBase}/v1/messages`;
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-api-key': apiKey,
@@ -200,16 +203,17 @@ async function callAnthropicFormat(
   };
 
   // Anthropic messages API 格式转换
-  const anthropicBody = {
+  const systemContent = body.messages?.find((m: any) => m.role === 'system')?.content;
+  const anthropicBody: Record<string, any> = {
     model: body.model,
     max_tokens: body.max_tokens || 4096,
-    temperature: body.temperature || 0.7,
-    system: body.messages?.find((m: any) => m.role === 'system')?.content || '',
+    temperature: body.temperature ?? 0.7,
     messages: body.messages
       ?.filter((m: any) => m.role !== 'system')
       .map((m: any) => ({ role: m.role, content: m.content })),
     stream,
   };
+  if (systemContent) anthropicBody.system = systemContent;
 
   const response = await fetch(url, {
     method: 'POST',
@@ -280,6 +284,116 @@ async function callAnthropicFormat(
             } catch {
               // 跳过非 JSON
             }
+          }
+        }
+      }
+      sendSSE(res, 'done', { content: fullContent });
+      res.end();
+    } catch (err: any) {
+      sendSSE(res, 'error', { message: err.message });
+      res.end();
+    }
+  }
+}
+
+// ===== Google Gemini 格式适配 =====
+// Google Gemini API 使用 generateContent 端点，消息格式与 OpenAI 不同。
+// 系统指令放在 systemInstruction 字段，消息用 parts 结构。
+
+async function callGoogleFormat(
+  apiKey: string,
+  baseUrl: string,
+  body: Record<string, any>,
+  stream: boolean,
+  res?: Response
+): Promise<string | void> {
+  // 拼接 Gemini 端点，避免双重 /v1 或 /v1beta
+  const cleanBase = baseUrl.replace(/\/+$/, '').replace(/\/v1(?:beta)?$/i, '') || 'https://generativelanguage.googleapis.com';
+  // 提取模型名
+  const model = body.model || 'gemini-2.0-flash';
+  const action = stream ? 'streamGenerateContent' : 'generateContent';
+  const url = `${cleanBase}/v1beta/models/${model}:${action}?key=${encodeURIComponent(apiKey)}`;
+
+  // 将 OpenAI 格式消息转换为 Gemini 格式
+  const systemContent = body.messages?.find((m: any) => m.role === 'system')?.content || '';
+  const geminiContents = (body.messages || [])
+    .filter((m: any) => m.role !== 'system')
+    .map((m: any) => {
+      // Gemini 用 "user" 和 "model" 代替 "user" 和 "assistant"
+      const role = m.role === 'assistant' ? 'model' : 'user';
+      return { role, parts: [{ text: m.content }] };
+    });
+
+  const geminiBody: Record<string, any> = {
+    contents: geminiContents,
+    generationConfig: {
+      temperature: body.temperature ?? 0.7,
+      maxOutputTokens: body.maxTokens || 4096,
+    },
+  };
+  if (systemContent) {
+    geminiBody.systemInstruction = { parts: [{ text: systemContent }] };
+  }
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(geminiBody),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    const errMsg = `Google Gemini API 错误 (${response.status}): ${errorText.slice(0, 500)}`;
+    if (stream && res) {
+      sendSSE(res, 'error', { message: errMsg, status: response.status });
+      res.end();
+      return;
+    }
+    throw new Error(errMsg);
+  }
+
+  if (!stream) {
+    const json = await response.json();
+    const content = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    return content;
+  }
+
+  // SSE 流式读取 Gemini 格式（Gemini streamGenerateContent 返回 JSON 数组行）
+  if (res) {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      sendSSE(res, 'error', { message: '无法读取流式响应' });
+      res.end();
+      return;
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let fullContent = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        // Gemini 流式响应是一系列 JSON 对象，可能以 ] 或换行分隔
+        // 处理方式：尝试从 buffer 中提取完整的 JSON 对象
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === '[' || trimmed === ']' || trimmed === ',') continue;
+          try {
+            const parsed = JSON.parse(trimmed);
+            const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            if (text) {
+              fullContent += text;
+              sendSSE(res, 'delta', { content: text, fullContent });
+            }
+          } catch {
+            // 可能是不完整 JSON，跳过
           }
         }
       }
@@ -369,8 +483,9 @@ function toAnthropicMessages(messages: any[]): { system: string; messages: any[]
   return { system, messages: out };
 }
 
-async function callAnthropicRaw(apiKey: string, body: Record<string, any>): Promise<any> {
-  const url = 'https://api.anthropic.com/v1/messages';
+async function callAnthropicRaw(apiKey: string, baseUrl: string, body: Record<string, any>): Promise<any> {
+  const cleanBase = baseUrl.replace(/\/+$/, '').replace(/\/v1$/i, '') || 'https://api.anthropic.com';
+  const url = `${cleanBase}/v1/messages`;
   // 将 OpenAI 格式 tools 转换为 Anthropic 格式
   const anthropicTools = (body.tools || []).map((t: any) => ({
     name: t.function?.name || t.name,
@@ -421,7 +536,7 @@ async function runAgenticLoop(
     const body = { ...initialBody, messages };
 
     if (provider === 'anthropic') {
-      const json = await callAnthropicRaw(apiKey, body);
+      const json = await callAnthropicRaw(apiKey, baseUrl, body);
       const toolUses = (json.content || []).filter((b: any) => b.type === 'tool_use');
       const textBlocks = (json.content || []).filter((b: any) => b.type === 'text');
       const text = textBlocks.map((b: any) => b.text).join('\n');
@@ -609,7 +724,7 @@ async function streamAgenticLoop(
     const body = { ...initialBody, messages };
 
     if (provider === 'anthropic') {
-      const json = await callAnthropicRaw(apiKey, body);
+      const json = await callAnthropicRaw(apiKey, baseUrl, body);
       const toolUses = (json.content || []).filter((b: any) => b.type === 'tool_use');
       const textBlocks = (json.content || []).filter((b: any) => b.type === 'text');
       const text = textBlocks.map((b: any) => b.text).join('\n');
@@ -692,7 +807,8 @@ async function fetchProviderModels(provider: string, apiKey: string, baseUrl: st
     }
 
     if (provider === 'google') {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+      const cleanBase = baseUrl.replace(/\/+$/, '').replace(/\/v1(?:beta)?$/i, '') || 'https://generativelanguage.googleapis.com';
+      const url = `${cleanBase}/v1beta/models?key=${encodeURIComponent(apiKey)}`;
       const resp = await fetch(url, { signal: controller.signal });
       if (!resp.ok) {
         const txt = await resp.text().catch(() => '');
@@ -760,14 +876,15 @@ router.post('/test', async (req: Request, res: Response) => {
 
     const startTime = Date.now();
 
-    // 用最小请求测试连通性
-    const testModel = model || 'gpt-4o-mini';
+    // 用最小请求测试连通性 — 按 provider 智能选择默认测试模型
+    const testModel = model || (provider === 'deepseek' ? 'deepseek-chat' : provider === 'google' ? 'gemini-2.0-flash' : 'gpt-4o-mini');
     const testMessages = [{ role: 'user', content: 'Hi' }];
 
     if (provider === 'anthropic') {
       // Anthropic：发一条极短请求
       const anthropicModel = model || 'claude-3-5-haiku-latest';
-      const anthropicUrl = 'https://api.anthropic.com/v1/messages';
+      const cleanBase = (baseUrl || '').replace(/\/+$/, '').replace(/\/v1$/i, '') || 'https://api.anthropic.com';
+      const anthropicUrl = `${cleanBase}/v1/messages`;
       const resp = await fetch(anthropicUrl, {
         method: 'POST',
         headers: {
@@ -786,8 +903,9 @@ router.post('/test', async (req: Request, res: Response) => {
         res.json({ success: false, latency, status: resp.status, message: `Anthropic 返回 ${resp.status}: ${txt.slice(0, 200)}` });
       }
     } else if (provider === 'google') {
-      // Google：用 models list 测试（更轻量）
-      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+      // Google：用 models list 测试（更轻量）— 支持自定义 baseUrl
+      const cleanBase = (baseUrl || '').replace(/\/+$/, '').replace(/\/v1(?:beta)?$/i, '') || 'https://generativelanguage.googleapis.com';
+      const url = `${cleanBase}/v1beta/models?key=${encodeURIComponent(apiKey)}`;
       const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
       const latency = Date.now() - startTime;
       if (resp.ok) {
@@ -861,7 +979,9 @@ router.post('/chat', async (req: Request, res: Response) => {
     let content: string | void;
 
     if (provider === 'anthropic') {
-      content = await callAnthropicFormat(resolvedApiKey, body, false);
+      content = await callAnthropicFormat(resolvedApiKey, baseUrl, body, false);
+    } else if (provider === 'google') {
+      content = await callGoogleFormat(resolvedApiKey, baseUrl, body, false);
     } else {
       // OpenAI / DeepSeek / Azure / 自定义 均走 OpenAI 格式
       const resolvedBaseUrl = provider === 'azure'
@@ -913,7 +1033,9 @@ router.post('/chat/stream', async (req: Request, res: Response) => {
     }
 
     if (provider === 'anthropic') {
-      await callAnthropicFormat(resolvedApiKey, body, true, res);
+      await callAnthropicFormat(resolvedApiKey, baseUrl, body, true, res);
+    } else if (provider === 'google') {
+      await callGoogleFormat(resolvedApiKey, baseUrl, body, true, res);
     } else {
       const resolvedBaseUrl = provider === 'azure'
         ? `${baseUrl}/openai/deployments/${model}`

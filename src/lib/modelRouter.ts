@@ -249,12 +249,14 @@ export function selectModel(
     return {
       channelId: e.channelId,
       modelName: e.modelName,
+      modelDisplayName: e.displayName || e.modelName,
       provider: e.provider,
       baseUrl: e.baseUrl,
       apiKey: e.apiKey,
       reasoning: '路由池仅一个模型，直接选用',
       alternatives: [],
       explored: false,
+      strategy: 'only_one',
     };
   }
 
@@ -303,12 +305,14 @@ export function selectModel(
   return {
     channelId: chosen.entry.channelId,
     modelName: chosen.entry.modelName,
+    modelDisplayName: chosen.entry.displayName || chosen.entry.modelName,
     provider: chosen.entry.provider,
     baseUrl: chosen.entry.baseUrl,
     apiKey: chosen.entry.apiKey,
     reasoning: `${explored ? '[探索] ' : ''}融合得分${chosen.finalScore.toFixed(3)}（${reasonParts.join(' · ')}）`,
     alternatives,
     explored,
+    strategy: explored ? 'explore' : 'score',
   };
 }
 

@@ -310,6 +310,16 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
       }
     });
 
+  // 兜底：5 分钟后如果流还没有 onDone，强制结束（防止永远卡住）
+  const fallbackTimer = setTimeout(() => {
+    if (!controller.signal.aborted) {
+      controller.abort();
+      callbacks.onDone?.({ content: '' });
+    }
+  }, 300000);
+
+  controller.signal.addEventListener('abort', () => clearTimeout(fallbackTimer));
+
   return controller;
 }
 
@@ -566,7 +576,7 @@ async function getManualRoutingDecision(): Promise<RoutingDecision | null> {
 
   // defaultModelId 格式: "channelId:modelName"
   const [channelId, modelName] = state.defaultModelId.split(':');
-  const channel = state.channels.find(c => c.id === channelId && c.enabled);
+  const channel = state.channels.find(c => c.id === channelId && c.enabled && c.apiKey);
   if (!channel) return null;
   const model = channel.models.find(m => m.name === modelName);
   if (!model) return null;
