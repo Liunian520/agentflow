@@ -22,7 +22,8 @@ import {
 import { useStore, providerPresets } from '../store/useStore';
 import { cn } from '../lib/utils';
 import type { Channel, ModelConfig, MCPServer, MCPTool } from '../types';
-import { connectMcpServer, listMcpTools } from '../api/llmApi';
+import { connectMcpServer, listMcpTools, fetchChannelModels } from '../api/llmApi';
+import type { FetchedModel } from '../api/llmApi';
 
 type Provider = 'openai' | 'anthropic' | 'google' | 'deepseek' | 'azure' | 'custom';
 
@@ -124,6 +125,12 @@ export function SettingsPage() {
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
 
+  // 模型池拉取（填写正确渠道后拉取模型并可勾选）
+  const [modelPool, setModelPool] = useState<FetchedModel[] | null>(null);
+  const [poolChecked, setPoolChecked] = useState<Record<string, boolean>>({});
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+
   // MCP 状态
   const [activeTab, setActiveTab] = useState<'channels' | 'mcp'>('channels');
   const [mcpDrawerOpen, setMcpDrawerOpen] = useState(false);
@@ -153,18 +160,66 @@ export function SettingsPage() {
       models: channel.models.map((m) => ({ ...m })),
       enabled: channel.enabled,
     });
+    // 把已保存模型初始化为勾选池
+    setModelPool(channel.models.map((m) => ({ id: m.name, name: m.name, displayName: m.displayName })));
+    setPoolChecked(Object.fromEntries(channel.models.map((m) => [m.name, true])));
+    setFetchError(null);
     setShowApiKey(false);
     setDrawerOpen(true);
   };
 
   const handleProviderChange = (provider: Provider) => {
     const preset = providerPresets[provider];
+    const apiKey = form.apiKey.trim();
     setForm((prev) => ({
       ...prev,
       provider,
       baseUrl: preset.baseUrl,
       models: preset.models.map((m) => ({ ...m, id: genModelId() })),
     }));
+    setModelPool(null);
+    setPoolChecked({});
+    setFetchError(null);
+    // 已填 Key 时切换提供商直接拉取新模型池
+    if (apiKey && preset.baseUrl) {
+      void doFetchModels(provider, apiKey, preset.baseUrl);
+    }
+  };
+
+  // 拉取模型池（支持覆盖参数，便于切换提供商时即时拉取）
+  const doFetchModels = async (provider: string, apiKey: string, baseUrl: string) => {
+    setFetchingModels(true);
+    setFetchError(null);
+    try {
+      const models = await fetchChannelModels({ provider, apiKey, baseUrl });
+      if (models.length === 0) {
+        setFetchError('未返回任何模型，请检查 API Key 与 Base URL 是否正确');
+        setModelPool([]);
+      } else {
+        setModelPool(models);
+        setPoolChecked(Object.fromEntries(models.map((m) => [m.name, true])));
+        showToast(`已拉取 ${models.length} 个模型，勾选要加入的`);
+      }
+    } catch (err: any) {
+      setFetchError(err.message || '拉取模型失败');
+      setModelPool(null);
+    } finally {
+      setFetchingModels(false);
+    }
+  };
+
+  const handleFetchModels = () => {
+    const apiKey = form.apiKey.trim();
+    const baseUrl = form.baseUrl.trim();
+    if (!apiKey) {
+      showToast('请先填写 API Key');
+      return;
+    }
+    if (!baseUrl && form.provider !== 'anthropic' && form.provider !== 'google') {
+      showToast('请先填写 Base URL');
+      return;
+    }
+    void doFetchModels(form.provider, apiKey, baseUrl);
   };
 
   const handleAddModel = () => {
@@ -201,7 +256,12 @@ export function SettingsPage() {
       showToast('API Key 长度不能超过 500 字符');
       return;
     }
-    const validModels = form.models.filter((m) => m.name.trim());
+    const validManual = form.models.filter((m) => m.name.trim());
+    const poolToAdd = (modelPool || [])
+      .filter((m) => poolChecked[m.name])
+      .filter((m) => !validManual.some((e) => e.name === m.name))
+      .map((m) => ({ id: genModelId(), name: m.name, displayName: m.displayName || m.name }));
+    const validModels = [...validManual, ...poolToAdd];
     if (validModels.length === 0) {
       showToast('至少需要添加一个模型');
       return;
@@ -860,24 +920,78 @@ export function SettingsPage() {
               {/* Models */}
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <label className="text-sm font-medium text-text-primary">
-                    模型列表{' '}
-                    <span className="text-xs text-text-tertiary">({form.models.length})</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleAddModel}
-                    className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    添加模型
-                  </button>
+                  <label className="text-sm font-medium text-text-primary">模型</label>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleFetchModels}
+                      disabled={fetchingModels}
+                      className="flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-border bg-white hover:bg-bg-secondary transition-colors text-text-secondary disabled:opacity-50"
+                    >
+                      {fetchingModels ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      拉取模型列表
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleAddModel}
+                      className="flex items-center gap-1 text-xs text-accent hover:text-accent-hover transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      添加模型
+                    </button>
+                  </div>
                 </div>
+
+                {fetchError && (
+                  <p className="text-xs text-red-500 mb-2">拉取失败：{fetchError}</p>
+                )}
+
+                {/* 拉取的模型池：勾选要加入 */}
+                {modelPool !== null && (
+                  <div className="rounded-md border border-border bg-bg-secondary p-3 mb-3 space-y-2">
+                    <div className="text-xs font-medium text-text-secondary flex items-center gap-1">
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      来自 {providerLabels[form.provider]} 的模型池（勾选要加入）
+                    </div>
+                    <div className="max-h-44 overflow-y-auto space-y-1">
+                      {modelPool.length === 0 ? (
+                        <p className="text-xs text-text-tertiary">未返回任何模型，请检查 API Key 与 Base URL。</p>
+                      ) : (
+                        modelPool.map((m) => (
+                          <label
+                            key={m.name}
+                            className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-white/60 cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={!!poolChecked[m.name]}
+                              onChange={(e) =>
+                                setPoolChecked((prev) => ({ ...prev, [m.name]: e.target.checked }))
+                              }
+                              className="accent-accent w-4 h-4 flex-shrink-0"
+                            />
+                            <span className="text-xs font-mono text-text-primary truncate">{m.name}</span>
+                            {m.displayName && m.displayName !== m.name && (
+                              <span className="text-xs text-text-tertiary truncate">· {m.displayName}</span>
+                            )}
+                          </label>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* 手动添加 / 已保存模型（始终包含） */}
+                <div className="text-xs text-text-tertiary mb-2">手动添加或已保存的模型（直接包含）：</div>
                 <div className="space-y-2">
                   {form.models.length === 0 ? (
                     <div className="text-center py-6 bg-bg-secondary rounded-md border border-dashed border-border">
                       <Cpu className="w-6 h-6 text-text-tertiary mx-auto mb-1.5" />
-                      <p className="text-xs text-text-tertiary">暂无模型，点击"添加模型"创建</p>
+                      <p className="text-xs text-text-tertiary">暂无手动模型，点击"添加模型"创建</p>
                     </div>
                   ) : (
                     form.models.map((m) => (

@@ -26,6 +26,7 @@ interface LLMChatRequest {
   tools?: any[]; // Phase 6：MCP 工具 / function calling schema
   // 以下是加密私钥相关的字段（复用现有加密体系）
   privateKeyEncrypted?: string;
+  apiKeyEncrypted?: string;
 }
 
 interface LLMChannelConfig {
@@ -655,6 +656,99 @@ async function streamAgenticLoop(
   sendSSE(res, 'done', { content: '[已达到最大工具调用轮次，停止以避免无限循环]' });
   res.end();
 }
+
+// ===== 模型池拉取 =====
+// 按 provider 从对应厂商 API 拉取可用模型列表，供前端「配置渠道后直接拉取模型池并选择」使用。
+// 注意：apiKey 仅用于本次代理请求，不记录、不落盘、不打印。
+
+interface FetchedModel {
+  id: string;
+  name: string;
+  displayName: string;
+}
+
+// Anthropic 无公开 list 接口，返回精选模型池
+const ANTHROPIC_MODELS: FetchedModel[] = [
+  { id: 'claude-3-5-sonnet-latest', name: 'claude-3-5-sonnet-latest', displayName: 'Claude 3.5 Sonnet' },
+  { id: 'claude-3-5-haiku-latest', name: 'claude-3-5-haiku-latest', displayName: 'Claude 3.5 Haiku' },
+  { id: 'claude-3-opus-latest', name: 'claude-3-opus-latest', displayName: 'Claude 3 Opus' },
+  { id: 'claude-3-haiku', name: 'claude-3-haiku', displayName: 'Claude 3 Haiku' },
+  { id: 'claude-3-sonnet', name: 'claude-3-sonnet', displayName: 'Claude 3 Sonnet' },
+  { id: 'claude-3-opus', name: 'claude-3-opus', displayName: 'Claude 3 Opus' },
+  { id: 'claude-2.1', name: 'claude-2.1', displayName: 'Claude 2.1' },
+];
+
+function prettyName(name: string): string {
+  // 简单美化：保留原始名称作为显示名（模型名本身已具可读性）
+  return name;
+}
+
+async function fetchProviderModels(provider: string, apiKey: string, baseUrl: string): Promise<FetchedModel[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    if (provider === 'anthropic') {
+      return ANTHROPIC_MODELS;
+    }
+
+    if (provider === 'google') {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
+      const resp = await fetch(url, { signal: controller.signal });
+      if (!resp.ok) {
+        const txt = await resp.text().catch(() => '');
+        throw new Error(`Google API 返回 ${resp.status}: ${txt.slice(0, 200)}`);
+      }
+      const data = await resp.json();
+      return (data.models || [])
+        .filter((m: any) => Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent'))
+        .map((m: any) => {
+          const name = (m.name || '').replace(/^models\//, '');
+          return { id: name, name, displayName: prettyName(name) };
+        })
+        .filter((m: FetchedModel) => m.name);
+    }
+
+    // OpenAI 兼容：openai / deepseek / azure / custom —— 走 /models 端点
+    const cleanBase = (baseUrl || '').replace(/\/+$/, '');
+    if (!cleanBase) throw new Error('custom / azure 提供商需要填写 Base URL');
+    const modelsUrl = `${cleanBase}/models`;
+    const resp = await fetch(modelsUrl, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      const txt = await resp.text().catch(() => '');
+      throw new Error(`拉取失败 ${resp.status}: ${txt.slice(0, 200)}`);
+    }
+    const data = await resp.json();
+    const list: any[] = Array.isArray(data) ? data : (data.data || []);
+    return list
+      .map((m: any) => {
+        const name = m.id || m.name || '';
+        return { id: name, name, displayName: prettyName(name) };
+      })
+      .filter((m: FetchedModel) => m.name);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+router.post('/models', async (req: Request, res: Response) => {
+  try {
+    const { provider, apiKey, baseUrl } = req.body as { provider?: string; apiKey?: string; baseUrl?: string };
+    if (!provider || !apiKey) {
+      return res.status(400).json({ success: false, message: '缺少 provider 或 apiKey' });
+    }
+    if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
+      return res.status(400).json({ success: false, message: 'baseUrl 格式无效' });
+    }
+    const models = await fetchProviderModels(provider, apiKey, baseUrl || '');
+    res.json({ success: true, models });
+  } catch (err: any) {
+    // 不回显 apiKey
+    res.status(502).json({ success: false, message: err.message || '拉取模型失败' });
+  }
+});
 
 // ===== 主路由 =====
 

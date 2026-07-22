@@ -41,6 +41,34 @@ export interface SSECallbacks {
 }
 
 // ===== 非流式调用 =====
+// ===== 模型池拉取 =====
+export interface FetchedModel {
+  id: string;
+  name: string;
+  displayName: string;
+}
+
+/**
+ * 配置渠道后，按 provider 从厂商 API 拉取可用模型池。
+ * 由后端代理请求（避免前端暴露 API Key、规避 CORS）。
+ */
+export async function fetchChannelModels(payload: {
+  provider: string;
+  apiKey: string;
+  baseUrl: string;
+}): Promise<FetchedModel[]> {
+  const response = await fetch(`${API_BASE}/llm/models`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json();
+  if (!data.success) {
+    throw new Error(data.message || '拉取模型失败');
+  }
+  return data.models || [];
+}
+
 export async function chatLLM(options: LLMChatOptions): Promise<LLMChatResult> {
   const response = await fetch(`${API_BASE}/llm/chat`, {
     method: 'POST',
