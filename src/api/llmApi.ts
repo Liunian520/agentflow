@@ -10,6 +10,66 @@ import {
 } from '../lib/modelRouter';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001/api';
+const DEFAULT_TIMEOUT = 45000; // 45s，给 Render 冷启动留足时间
+const MAX_RETRIES = 2;
+
+/** 统一的 fetch 封装：超时 + 重试 + 清晰错误消息 */
+async function safeFetch<T>(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = DEFAULT_TIMEOUT,
+  retries: number = MAX_RETRIES,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const mergedSignal = options.signal
+    ? AbortSignal.any([options.signal, controller.signal])
+    : controller.signal;
+
+  const finalOptions = { ...options, signal: mergedSignal };
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, finalOptions);
+
+      if (!response.ok) {
+        // 优先读取后端返回的 JSON 错误中的 message 字段
+        let body = '';
+        try {
+          const json = await response.json();
+          body = json.message || JSON.stringify(json);
+        } catch {
+          body = await response.text().catch(() => '');
+        }
+        throw new Error(`HTTP ${response.status}: ${body.slice(0, 300) || response.statusText}`);
+      }
+
+      const data = await response.json();
+      clearTimeout(timer);
+      return data as T;
+    } catch (err: any) {
+      lastError = err;
+      // 超时不再重试；4xx 客户端错误也不再重试
+      if (err.name === 'AbortError' || err.message?.startsWith('HTTP 4')) {
+        break;
+      }
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+      }
+    }
+  }
+
+  clearTimeout(timer);
+
+  if (lastError?.name === 'AbortError') {
+    throw new Error(
+      `请求超时 (${timeoutMs / 1000}s)。后端 Render 服务可能正在冷启动，请等待 15-30 秒后重试；如持续失败请检查网络能否访问 ${API_BASE.replace('/api', '')}`
+    );
+  }
+  throw new Error(lastError?.message || '网络请求失败，请检查后端服务是否在线');
+}
 
 // ===== 类型定义 =====
 export interface LLMChatOptions {
@@ -46,6 +106,25 @@ export interface SSECallbacks {
   onTool?: (data: { name: string; status: 'running' | 'done'; result?: string }) => void;
 }
 
+// ===== 后端健康检查 =====
+export async function checkBackendHealth(): Promise<{ ok: boolean; latency: number; message?: string }> {
+  const start = Date.now();
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+    const response = await fetch(`${API_BASE.replace(/\/api\/?$/, '')}/health`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!response.ok) {
+      return { ok: false, latency: Date.now() - start, message: `后端返回 ${response.status}` };
+    }
+    return { ok: true, latency: Date.now() - start };
+  } catch (err: any) {
+    return { ok: false, latency: Date.now() - start, message: err.message || '无法连接后端' };
+  }
+}
+
 // ===== 非流式调用 =====
 // ===== 模型池拉取 =====
 export interface FetchedModel {
@@ -63,12 +142,14 @@ export async function fetchChannelModels(payload: {
   apiKey: string;
   baseUrl: string;
 }): Promise<FetchedModel[]> {
-  const response = await fetch(`${API_BASE}/llm/models`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await response.json();
+  const data = await safeFetch<{ success: boolean; models?: FetchedModel[]; message?: string }>(
+    `${API_BASE}/llm/models`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    },
+  );
   if (!data.success) {
     throw new Error(data.message || '拉取模型失败');
   }
@@ -91,12 +172,11 @@ export async function testChannelConnection(payload: {
   baseUrl: string;
   model?: string;
 }): Promise<ChannelTestResult> {
-  const response = await fetch(`${API_BASE}/llm/test`, {
+  return await safeFetch<ChannelTestResult>(`${API_BASE}/llm/test`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  return await response.json();
 }
 
 export async function chatLLM(options: LLMChatOptions): Promise<LLMChatResult> {

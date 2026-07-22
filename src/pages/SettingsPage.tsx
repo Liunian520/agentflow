@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Plus,
   Settings,
@@ -37,7 +37,7 @@ import {
 import { useStore, providerPresets } from '../store/useStore';
 import { cn } from '../lib/utils';
 import type { Channel, ModelConfig, MCPServer, MCPTool } from '../types';
-import { connectMcpServer, listMcpTools, fetchChannelModels, testChannelConnection } from '../api/llmApi';
+import { connectMcpServer, listMcpTools, fetchChannelModels, testChannelConnection, checkBackendHealth } from '../api/llmApi';
 import type { FetchedModel, ChannelTestResult } from '../api/llmApi';
 
 type Provider = 'openai' | 'anthropic' | 'google' | 'deepseek' | 'azure' | 'custom';
@@ -160,6 +160,25 @@ export function SettingsPage() {
   // 渠道连接测试
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testResults, setTestResults] = useState<Record<string, ChannelTestResult>>({});
+
+  // 后端连接诊断
+  const [backendHealth, setBackendHealth] = useState<{ ok: boolean; latency: number; message?: string } | null>(null);
+  const [checkingBackend, setCheckingBackend] = useState(false);
+
+  const handleCheckBackend = async () => {
+    setCheckingBackend(true);
+    const result = await checkBackendHealth();
+    setBackendHealth(result);
+    setCheckingBackend(false);
+    if (!result.ok) {
+      showToast(`后端连接异常：${result.message}`);
+    }
+  };
+
+  // 进入设置页时自动检查一次后端连通性
+  useEffect(() => {
+    void handleCheckBackend();
+  }, []);
 
   // MCP 状态
   const [mcpDrawerOpen, setMcpDrawerOpen] = useState(false);
@@ -579,6 +598,55 @@ export function SettingsPage() {
                 </div>
               );
             })}
+          </div>
+
+          {/* 后端连接诊断 */}
+          <div className="bg-white border border-border rounded-xl p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className={cn(
+                  'w-10 h-10 rounded-lg flex items-center justify-center',
+                  backendHealth === null
+                    ? 'bg-gray-100 text-gray-500'
+                    : backendHealth.ok
+                      ? 'bg-emerald-50 text-emerald-600'
+                      : 'bg-red-50 text-red-600'
+                )}>
+                  {checkingBackend ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : backendHealth?.ok ? (
+                    <CheckCircle2 className="w-5 h-5" />
+                  ) : (
+                    <AlertCircle className="w-5 h-5" />
+                  )}
+                </div>
+                <div>
+                  <div className="text-sm font-medium text-text-primary">
+                    {backendHealth === null
+                      ? '正在检查后端的连接…'
+                      : backendHealth.ok
+                        ? `后端连接正常 (${backendHealth.latency}ms)`
+                        : '后端连接异常'}
+                  </div>
+                  <div className="text-xs text-text-tertiary">
+                    {backendHealth === null
+                      ? 'Render 服务冷启动可能需要 10-20 秒'
+                      : backendHealth.ok
+                        ? '如果渠道测试仍失败，请检查该渠道的 API Key / Base URL'
+                        : backendHealth.message || '无法访问后端服务'}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCheckBackend}
+                disabled={checkingBackend}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-text-secondary hover:text-text-primary hover:bg-bg-secondary rounded-md transition-colors disabled:opacity-50"
+              >
+                {checkingBackend ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Activity className="w-3.5 h-3.5" />}
+                重新检测
+              </button>
+            </div>
           </div>
 
           {/* 渠道管理 */}
