@@ -48,7 +48,7 @@ git push -u origin main
 
 部署完成后，Render 会给你一个域名：
 ```
-https://agentflow-server.onrender.com
+https://agentflow-server-71j2.onrender.com
 ```
 
 ### 4. 部署前端
@@ -65,7 +65,7 @@ wrangler login
 # 3. 配置后端地址
 cp .env.example .env.production
 # 编辑 .env.production：
-# VITE_API_BASE=https://agentflow-server.onrender.com/api
+# VITE_API_BASE=https://agentflow-server-71j2.onrender.com/api
 
 # 4. 构建并部署
 npm run deploy
@@ -78,7 +78,7 @@ npm install -g vercel
 
 # 配置环境变量
 vercel env add VITE_API_BASE production
-# 输入: https://agentflow-server.onrender.com/api
+# 输入: https://agentflow-server-71j2.onrender.com/api
 
 # 部署
 vercel --prod
@@ -90,7 +90,7 @@ vercel --prod
 npm install -g netlify-cli
 
 # 配置环境变量
-netlify env:set VITE_API_BASE https://agentflow-server.onrender.com/api
+netlify env:set VITE_API_BASE https://agentflow-server-71j2.onrender.com/api
 
 # 部署
 netlify deploy --prod --dir=dist
@@ -175,7 +175,7 @@ Cloudflare Pages 默认按静态文件匹配路由，直接访问子路径会返
 
 ```bash
 # 每 5 分钟 Ping 一次
-curl -s https://agentflow-server.onrender.com/health
+curl -s https://agentflow-server-71j2.onrender.com/health
 ```
 
 或用 UptimeRobot 等免费服务监控 `/health` 接口。

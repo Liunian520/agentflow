@@ -2,8 +2,8 @@
 # Required GitHub Secrets:
 #   CLOUDFLARE_API_TOKEN  - Cloudflare API Token with Pages:Edit
 #   CLOUDFLARE_ACCOUNT_ID - Cloudflare Account ID
-# Required GitHub Variables:
-#   VITE_API_BASE - backend API URL, e.g. https://agentflow-server.onrender.com/api
+# Required GitHub Variables (optional if using default below):
+#   VITE_API_BASE - backend API URL, e.g. https://agentflow-server-71j2.onrender.com/api
 name: Deploy to Cloudflare Pages
 
 on:
@@ -32,7 +32,8 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_API_BASE: ${{ vars.VITE_API_BASE }}
+          # 优先使用仓库变量；若未设置则回退到当前 Render 实例的真实地址
+          VITE_API_BASE: ${{ vars.VITE_API_BASE || 'https://agentflow-server-71j2.onrender.com/api' }}
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
