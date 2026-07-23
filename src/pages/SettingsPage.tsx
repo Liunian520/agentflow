@@ -194,6 +194,15 @@ export function SettingsPage() {
     setTimeout(() => setToast(null), 2500);
   };
 
+  // 挑选一个适合 /chat/completions 测试的模型：优先非 image/video/audio/embedding/tts 类模型
+  const pickTestModel = (models?: { name: string }[]) => {
+    if (!models || models.length === 0) return undefined;
+    const nonVisual = models.filter(
+      (m) => !/image|video|audio|embedding|tts|transcribe|moderation|vision/i.test(m.name),
+    );
+    return (nonVisual.length > 0 ? nonVisual : models)[0].name;
+  };
+
   // ===== 渠道连接测试 =====
   const handleTestChannel = async (channel: Channel) => {
     setTestingId(channel.id);
@@ -202,7 +211,7 @@ export function SettingsPage() {
         provider: channel.provider,
         apiKey: channel.apiKey,
         baseUrl: channel.baseUrl,
-        model: channel.models[0]?.name,
+        model: pickTestModel(channel.models),
       });
       setTestResults((prev) => ({ ...prev, [channel.id]: result }));
       showToast(result.success ? `✅ ${result.message}` : `❌ ${result.message}`);
