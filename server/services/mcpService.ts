@@ -9,6 +9,57 @@
 import type { Request, Response } from 'express';
 import express from 'express';
 import { spawn } from 'child_process';
+import path from 'path';
+import fs from 'fs';
+import { assertSafeOutboundUrl } from './urlGuard';
+
+/**
+ * 校验 local-fs 要暴露的目录：
+ *  - 必须是绝对路径且真实存在的目录
+ *  - 拒绝路径穿越 (..)
+ *  - 拒绝系统敏感根目录
+ *  - 若配置了 MCP_FS_ALLOWED_ROOTS（逗号分隔），则必须位于其中之一
+ */
+function assertSafeFsDir(dir: string): string {
+  if (!dir || !path.isAbsolute(dir)) {
+    throw new Error('fsDir 必须为绝对路径');
+  }
+  const resolved = path.resolve(dir);
+  if (resolved.includes('..')) {
+    throw new Error('fsDir 含非法路径穿越');
+  }
+
+  const deniedRoots = [
+    '/', '/etc', '/root', '/boot', '/sys', '/proc', '/var', '/usr', '/bin', '/sbin',
+    'C:\\', 'C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)',
+  ].map((p) => path.resolve(p).toLowerCase());
+  if (deniedRoots.includes(resolved.toLowerCase())) {
+    throw new Error(`fsDir 拒绝暴露系统目录: ${resolved}`);
+  }
+
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(resolved);
+  } catch {
+    throw new Error(`fsDir 不存在: ${resolved}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`fsDir 不是目录: ${resolved}`);
+  }
+
+  const allowed = (process.env.MCP_FS_ALLOWED_ROOTS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean).map((p) => path.resolve(p));
+  if (allowed.length > 0) {
+    const ok = allowed.some((root) => {
+      const rel = path.relative(root, resolved);
+      return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+    });
+    if (!ok) {
+      throw new Error(`fsDir 不在允许的根目录白名单内: ${resolved}`);
+    }
+  }
+  return resolved;
+}
 
 export interface McpTool {
   name: string;
@@ -34,6 +85,7 @@ interface McpSession {
   child?: any;
   pending?: Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>;
   stdioBuf?: string;
+  spawnError?: string;
 }
 
 // 运行时内存会话注册表（按 server id 索引）
@@ -131,22 +183,52 @@ function createStdioSession(config: McpServerConfig): McpSession {
   child.stderr?.on('data', () => {
     /* 静默忽略子进程日志 */
   });
-  child.on('exit', () => {
-    session.pending?.forEach((p) => p.reject(new Error('MCP stdio 进程已退出')));
+  // spawn 失败（如 npx 不存在 / 权限不足）会触发 error 事件；若不处理会导致后端进程崩溃
+  child.on('error', (err: any) => {
+    session.spawnError = err?.message || String(err);
+    session.pending?.forEach((p) => p.reject(new Error(`MCP 子进程启动失败: ${session.spawnError}`)));
+    session.pending?.clear();
+  });
+  child.on('exit', (code: number) => {
+    session.pending?.forEach((p) => p.reject(new Error(`MCP stdio 进程已退出 (code=${code})`)));
     session.pending?.clear();
   });
 
   return session;
 }
 
+const STDIO_RPC_TIMEOUT = 30000;
 let stdioReqId = 1;
 function stdioRpc(session: McpSession, method: string, params: any, notify = false): Promise<any> {
   return new Promise((resolve, reject) => {
+    if (session.spawnError) {
+      reject(new Error(`MCP 子进程不可用: ${session.spawnError}`));
+      return;
+    }
     const id = notify ? undefined : stdioReqId++;
-    if (!notify && id !== undefined) session.pending?.set(id, { resolve, reject });
-    session.child?.stdin?.write(
-      JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n',
-    );
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (!notify && id !== undefined) {
+      timer = setTimeout(() => {
+        if (session.pending?.has(id)) {
+          session.pending.delete(id);
+          reject(new Error(`MCP stdio 调用超时 (${STDIO_RPC_TIMEOUT / 1000}s): ${method}`));
+        }
+      }, STDIO_RPC_TIMEOUT);
+      session.pending?.set(id, {
+        resolve: (v) => { if (timer) clearTimeout(timer); resolve(v); },
+        reject: (e) => { if (timer) clearTimeout(timer); reject(e); },
+      });
+    }
+    try {
+      session.child?.stdin?.write(
+        JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n',
+      );
+    } catch (e: any) {
+      if (timer) clearTimeout(timer);
+      if (id !== undefined) session.pending?.delete(id);
+      reject(new Error(`MCP stdio 写入失败: ${e?.message || e}`));
+      return;
+    }
     if (notify) resolve(undefined);
   });
 }
@@ -155,6 +237,10 @@ function stdioRpc(session: McpSession, method: string, params: any, notify = fal
 export async function connectMcp(config: McpServerConfig): Promise<{ tools: McpTool[] }> {
   // —— local-fs：spawn 本地 stdio filesystem server ——
   if (config.transport === 'local-fs') {
+    // 校验暴露目录，防止 AI 读写系统敏感目录
+    const safeDir = assertSafeFsDir(config.fsDir || '');
+    config = { ...config, fsDir: safeDir };
+
     // 同一 id 已存在则先回收旧子进程
     const old = sessions.get(config.id);
     if (old?.child) {
@@ -182,6 +268,7 @@ export async function connectMcp(config: McpServerConfig): Promise<{ tools: McpT
   }
 
   // —— streamable-http / sse ——
+  await assertSafeOutboundUrl(config.url!, 'MCP url');
   const session: McpSession = { config, tools: [], protocolVersion: PROTOCOL_VERSION };
 
   await rpc(session, 'initialize', {

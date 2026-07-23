@@ -177,7 +177,7 @@ function normalizePlan(raw: any): OrchestrationPlan {
     const validNodeTypes: NodeType[] = [
       'start', 'end', 'llm', 'agent', 'code', 'http',
       'condition', 'loop', 'variable', 'database', 'host',
-      'knowledge', 'template', 'human-in-loop', 'subworkflow', 'subagent',
+      'knowledge', 'template', 'human-in-loop', 'subworkflow', 'subagent', 'a2a',
     ];
 
     workflow = {

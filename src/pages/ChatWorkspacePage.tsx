@@ -146,7 +146,16 @@ export function ChatWorkspacePage() {
   const [activeMode, setActiveMode] = useState<AgentMode>('code');
 
   // 对话会话状态
-  const [sessions, setSessions] = useState<ChatSession[]>([
+  const CHAT_SESSIONS_KEY = 'agentflow.chatSessions.v1';
+  const CHAT_ACTIVE_KEY = 'agentflow.chatActiveSession.v1';
+  const [sessions, setSessions] = useState<ChatSession[]>(() => {
+    try {
+      const raw = localStorage.getItem(CHAT_SESSIONS_KEY);
+      if (raw) return JSON.parse(raw) as ChatSession[];
+    } catch {
+      // 忽略损坏的本地数据，回退到默认会话
+    }
+    return [
     {
       id: 'session-default',
       title: '新对话',
@@ -163,8 +172,26 @@ export function ChatWorkspacePage() {
       updatedAt: new Date().toISOString(),
       mode: 'code',
     },
-  ]);
-  const [activeSessionId, setActiveSessionId] = useState('session-default');
+    ];
+  });
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
+    return localStorage.getItem(CHAT_ACTIVE_KEY) || 'session-default';
+  });
+  // 持久化会话与当前会话 ID 到 localStorage，刷新后自动恢复
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_SESSIONS_KEY, JSON.stringify(sessions));
+    } catch {
+      // 忽略配额超限等写入失败
+    }
+  }, [sessions]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHAT_ACTIVE_KEY, activeSessionId);
+    } catch {
+      // 忽略写入失败
+    }
+  }, [activeSessionId]);
   const [inputValue, setInputValue] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);

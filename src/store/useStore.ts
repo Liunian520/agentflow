@@ -9,6 +9,47 @@ import { getChannelForModel, getAvailableChannelFromStore, routedChatLLM, sendA2
 import { INITIAL_META_SKILL } from '../lib/metaSkill';
 import { extractTaskFeatures } from '../lib/modelRouter';
 
+// ===== 工作流执行辅助：表达式求值 / 模板替换 / 值转换 =====
+
+/** 将 {{var}} 模板与裸变量名注入沙箱求值布尔表达式，任何异常都返回 false（安全兜底） */
+function evalConditionExpression(expr: string, vars: Record<string, any>): boolean {
+  if (!expr || !expr.trim()) return false;
+  try {
+    // {{var}} / {{a.b}} → vars["var"]
+    const normalized = expr.replace(/\{\{\s*([\w.$]+)\s*\}\}/g, (_m, k) => `__vars[${JSON.stringify(k)}]`);
+    // 将合法标识符的变量以局部常量形式暴露，支持裸变量名 (如 count > 5)
+    const keys = Object.keys(vars).filter((k) => /^[A-Za-z_$][\w$]*$/.test(k));
+    const header = keys.map((k) => `var ${k} = __vars[${JSON.stringify(k)}];`).join('');
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('__vars', `"use strict"; ${header} try { return !!(${normalized}); } catch(_e) { return false; }`);
+    return fn(vars);
+  } catch {
+    return false;
+  }
+}
+
+/** 替换字符串中的 {{var}} 模板为变量值 */
+function substituteTemplate(input: string, vars: Record<string, any>): string {
+  if (!input) return input;
+  return input.replace(/\{\{\s*([\w.$]+)\s*\}\}/g, (_m, k) => {
+    const v = vars[k];
+    return v === undefined || v === null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+  });
+}
+
+/** 按 valueType 将字符串值转换为运行期真实值 */
+function coerceValue(raw: string, valueType?: string): any {
+  if (valueType === 'number') {
+    const n = Number(raw);
+    return Number.isNaN(n) ? 0 : n;
+  }
+  if (valueType === 'boolean') return raw === 'true' || raw === '1';
+  if (valueType === 'object' || valueType === 'array') {
+    try { return JSON.parse(raw); } catch { return valueType === 'array' ? [] : {}; }
+  }
+  return raw;
+}
+
 // ===== 检查点（命名快照，持久化） =====
 export interface Checkpoint {
   id: string;
@@ -376,7 +417,11 @@ export const useStore = create<AppState>()(
   theme: 'light',
   setDefaultModelId: (id) => set({ defaultModelId: id }),
   setRouterEnabled: (enabled) => set({ routerEnabled: enabled }),
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    set({ theme });
+    // 立即应用到 DOM（切换 <html> 上的 .dark 类）
+    import('../lib/theme').then(({ applyTheme }) => applyTheme(theme)).catch(() => {});
+  },
 
   // Remote Hosts
   hosts: mockHosts,
@@ -608,6 +653,8 @@ export const useStore = create<AppState>()(
     const newLogs: ExecutionLog[] = [...executionState.logs];
     const newVariables = { ...executionState.variables };
     const newCompleted = [...executionState.completedNodeIds, currentNode.id];
+    // 分支/循环节点可覆盖默认边路由：undefined=沿用默认取首边；string=指定目标节点；null=结束
+    let nextNodeIdOverride: string | null | undefined = undefined;
 
     switch (nodeType) {
       case 'start':
@@ -1391,50 +1438,143 @@ export const useStore = create<AppState>()(
 
       case 'condition': {
         const config = currentNode.defaultData?.conditionConfig;
+        const conditions = config?.conditions || [];
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
           nodeName: currentNode.name,
           timestamp: new Date().toISOString(),
           level: 'info',
-          message: `条件判断，共 ${config?.conditions?.length || 0} 个分支`,
+          message: `条件判断，共 ${conditions.length} 个分支`,
         });
-        const matchedBranch = config?.conditions?.[0]?.label || '默认分支';
+
+        // 逐条求值，命中首个为真的分支；都不命中走默认分支
+        let matchedLabel = config?.defaultLabel || '默认分支';
+        for (const cond of conditions) {
+          const result = evalConditionExpression(cond.expression, newVariables);
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: `分支「${cond.label}」: ${cond.expression || '(空)'} → ${result}`,
+          });
+          if (result) { matchedLabel = cond.label; break; }
+        }
+
+        // 依据命中分支的 label / sourceHandle 选择对应出边
+        const outEdges = workflow.edges.filter((e) => e.source === currentNode.id);
+        const matchedEdge =
+          outEdges.find((e) => e.label === matchedLabel || e.sourceHandle === matchedLabel) ||
+          outEdges.find((e) => (e.label || '').includes(matchedLabel)) ||
+          outEdges[0];
+        nextNodeIdOverride = matchedEdge ? matchedEdge.target : null;
+
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
           nodeName: currentNode.name,
           timestamp: new Date().toISOString(),
           level: 'success',
-          message: `匹配分支: ${matchedBranch}`,
+          message: `匹配分支: ${matchedLabel}`,
         });
         break;
       }
 
       case 'loop': {
         const config = currentNode.defaultData?.loopConfig;
-        newLogs.push({
-          id: `log-${generateId()}`,
-          nodeId: currentNode.id,
-          nodeName: currentNode.name,
-          timestamp: new Date().toISOString(),
-          level: 'info',
-          message: config?.loopType === 'count'
-            ? `循环开始，共 ${config.count} 次`
-            : `数组循环开始`,
-        });
+        const loopStateKey = `__loop_${currentNode.id}`;
+        const total = config?.loopType === 'count'
+          ? Math.max(0, Number(config?.count) || 0)
+          : (Array.isArray(newVariables[config?.arrayVariable || '']) ? (newVariables[config?.arrayVariable || ''] as any[]).length : 0);
+
+        const prev = (newVariables[loopStateKey] as { index: number } | undefined);
+        const index = prev ? prev.index : 0;
+
+        const outEdges = workflow.edges.filter((e) => e.source === currentNode.id);
+        // 循环体出边：label/handle 含 body/循环/loop；退出出边：含 done/exit/结束/完成
+        const bodyEdge =
+          outEdges.find((e) => /body|循环|loop|item|迭代/i.test(`${e.label || ''}${e.sourceHandle || ''}`)) || outEdges[0];
+        const exitEdge =
+          outEdges.find((e) => /done|exit|结束|完成|end|out/i.test(`${e.label || ''}${e.sourceHandle || ''}`)) ||
+          outEdges.find((e) => e !== bodyEdge) || null;
+
+        if (index < total && bodyEdge) {
+          // 注入当前迭代变量
+          if (config?.indexVariable) newVariables[config.indexVariable] = index;
+          if (config?.loopType === 'array' && config?.itemVariable) {
+            const arr = newVariables[config?.arrayVariable || ''] as any[];
+            newVariables[config.itemVariable] = arr?.[index];
+          } else if (config?.itemVariable) {
+            newVariables[config.itemVariable] = index;
+          }
+          newVariables[loopStateKey] = { index: index + 1 };
+          nextNodeIdOverride = bodyEdge.target;
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: `循环第 ${index + 1}/${total} 次`,
+          });
+        } else {
+          // 循环结束：清理状态，走退出边
+          delete newVariables[loopStateKey];
+          nextNodeIdOverride = exitEdge ? exitEdge.target : null;
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'success',
+            message: total === 0 ? '循环范围为空，跳过' : `循环完成，共 ${total} 次`,
+          });
+        }
         break;
       }
 
       case 'variable': {
         const config = currentNode.defaultData?.variableConfig;
+        const name = config?.variableName;
+        if (!name) {
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'warn',
+            message: '变量节点未配置变量名',
+          });
+          break;
+        }
+        const op = config?.operation || 'set';
+        const resolvedRaw = substituteTemplate(config?.value || '', newVariables);
+        const resolved = coerceValue(resolvedRaw, config?.valueType);
+        let finalValue: any;
+        switch (op) {
+          case 'append': {
+            const cur = newVariables[name];
+            if (Array.isArray(cur)) finalValue = [...cur, resolved];
+            else if (typeof cur === 'string') finalValue = cur + String(resolved);
+            else if (cur === undefined) finalValue = [resolved];
+            else finalValue = [cur, resolved];
+            break;
+          }
+          case 'increment': finalValue = (Number(newVariables[name]) || 0) + (Number(resolved) || 1); break;
+          case 'decrement': finalValue = (Number(newVariables[name]) || 0) - (Number(resolved) || 1); break;
+          case 'set':
+          default: finalValue = resolved; break;
+        }
+        newVariables[name] = finalValue;
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
           nodeName: currentNode.name,
           timestamp: new Date().toISOString(),
           level: 'success',
-          message: `变量 ${config?.operation || 'set'}: ${config?.variableName || '未命名'}`,
+          message: `变量 ${op}: ${name} = ${typeof finalValue === 'object' ? JSON.stringify(finalValue) : finalValue}`,
         });
         break;
       }
@@ -1523,12 +1663,11 @@ export const useStore = create<AppState>()(
     const nextEdges = workflow.edges.filter((e) => e.source === currentNode.id);
     let nextNodeId: string | null = null;
 
-    if (nextEdges.length > 0) {
-      if (nodeType === 'condition' && nextEdges.length > 1) {
-        nextNodeId = nextEdges[0].target;
-      } else {
-        nextNodeId = nextEdges[0].target;
-      }
+    if (nextNodeIdOverride !== undefined) {
+      // condition/loop 节点已显式决定路由（可能为 null 表示结束）
+      nextNodeId = nextNodeIdOverride;
+    } else if (nextEdges.length > 0) {
+      nextNodeId = nextEdges[0].target;
     }
 
     if (!nextNodeId) {
@@ -2110,21 +2249,56 @@ export const useStore = create<AppState>()(
         setItem: (name, value) => {
           try {
             localStorage.setItem(name, JSON.stringify(value));
+            return;
           } catch (e) {
-            console.error('localStorage quota exceeded, clearing old data:', e);
-            // quota exceeded: 清除最老的工作流数据以腾空间
+            console.warn('localStorage 配额超限，对本次写入的新数据渐进裁剪后重试:', e);
+          }
+          // 关键：裁剪的是「本次要写入的新值」而非磁盘旧值，避免丢失最新业务数据。
+          // 按「体积大 + 可再生」优先级逐步丢弃非核心字段，尽量保住 workflows/agents/channels 等核心数据。
+          const v: any = value;
+          const trimSteps: Array<() => void> = [
+            () => { if (v.state?.memoryAuditLog) v.state.memoryAuditLog = v.state.memoryAuditLog.slice(-50); },
+            () => { if (v.state?.dreamLogs) v.state.dreamLogs = v.state.dreamLogs.slice(-10); },
+            () => { if (v.state?.routerMemory?.length > 200) v.state.routerMemory = v.state.routerMemory.slice(-200); },
+            () => { if (v.state?.experienceBank?.length > 100) v.state.experienceBank = v.state.experienceBank.slice(-100); },
+            () => { if (v.state?.experientialReflections?.length > 50) v.state.experientialReflections = v.state.experientialReflections.slice(-50); },
+            () => { if (v.state?.messages?.length > 100) v.state.messages = v.state.messages.slice(-100); },
+            () => { if (v.state?.checkpoints) v.state.checkpoints = {}; },
+            () => { if (v.state?.routerMemory) v.state.routerMemory = []; },
+            () => { if (v.state?.experienceBank) v.state.experienceBank = []; },
+            () => { if (v.state?.handoffSummaries) v.state.handoffSummaries = []; },
+          ];
+          for (const step of trimSteps) {
             try {
-              const parsed = JSON.parse(localStorage.getItem(name) || '{}');
-              if (parsed.state?.workflows?.length > 5) {
-                parsed.state.workflows = parsed.state.workflows.slice(0, 5);
-              }
-              if (parsed.state?.messages?.length > 100) {
-                parsed.state.messages = parsed.state.messages.slice(-100);
-              }
-              localStorage.setItem(name, JSON.stringify(parsed));
+              step();
+              localStorage.setItem(name, JSON.stringify(v));
+              console.warn('裁剪后写入成功，已丢弃部分历史/经验数据以腾出空间');
+              return;
             } catch {
-              localStorage.removeItem(name);
+              // 继续下一级裁剪
             }
+          }
+          // 兜底：仍写不下，尽量只保留最核心字段
+          try {
+            const core = {
+              state: {
+                currentUser: v.state?.currentUser,
+                isFirstTime: v.state?.isFirstTime,
+                workflows: v.state?.workflows,
+                agents: v.state?.agents,
+                channels: v.state?.channels,
+                hosts: v.state?.hosts,
+                defaultModelId: v.state?.defaultModelId,
+                routerEnabled: v.state?.routerEnabled,
+                theme: v.state?.theme,
+              },
+              version: v.version,
+            };
+            localStorage.setItem(name, JSON.stringify(core));
+            console.warn('仅保留核心业务数据写入');
+          } catch {
+            console.error('localStorage 写入彻底失败，保留磁盘上已有数据不清空');
+            // 不再 removeItem，避免把用户之前成功保存的数据也抹掉
           }
         },
         removeItem: (name) => localStorage.removeItem(name),

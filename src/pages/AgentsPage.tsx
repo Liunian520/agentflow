@@ -51,6 +51,14 @@ export function AgentsPage() {
     temperature: 0.7,
   });
   const [toast, setToast] = useState<string | null>(null);
+  const [agentSearch, setAgentSearch] = useState('');
+  const filteredAgents = (() => {
+    const q = agentSearch.trim().toLowerCase();
+    if (!q) return agents;
+    return agents.filter(
+      (a) => a.name.toLowerCase().includes(q) || (a.description?.toLowerCase().includes(q) ?? false),
+    );
+  })();
 
   const currentAgent = agents.find((a) => a.id === selectedAgent);
 
@@ -488,6 +496,8 @@ export function AgentsPage() {
             <input
               type="text"
               placeholder="搜索 Agent..."
+              value={agentSearch}
+              onChange={(e) => setAgentSearch(e.target.value)}
               className="w-full pl-9 pr-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-bg-secondary"
             />
             <MessageSquare className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary" />
@@ -495,7 +505,7 @@ export function AgentsPage() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {agents.map((agent) => (
+          {filteredAgents.map((agent) => (
             <button
               key={agent.id}
               onClick={() => setSelectedAgent(agent.id)}
@@ -753,6 +763,8 @@ export function AgentsPage() {
                 <input
                   type="text"
                   placeholder="搜索 Agent..."
+                  value={agentSearch}
+                  onChange={(e) => setAgentSearch(e.target.value)}
                   className="w-full pl-9 pr-3 py-2.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-bg-secondary"
                 />
                 <MessageSquare className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary" />
@@ -760,7 +772,7 @@ export function AgentsPage() {
             </div>
 
             <div className="flex-1 overflow-y-auto p-2 space-y-1">
-              {agents.map((agent) => (
+              {filteredAgents.map((agent) => (
                 <button
                   key={agent.id}
                   onClick={() => handleAgentSelect(agent.id)}
@@ -905,7 +917,7 @@ export function AgentsPage() {
                 <Plus className="w-4 h-4" />
                 新建 Agent
               </button>
-              {agents.map((agent) => (
+              {filteredAgents.map((agent) => (
                 <div
                   key={agent.id}
                   className="flex items-center gap-3 p-3 border border-border rounded-lg hover:bg-bg-secondary/50 transition-colors"

@@ -5,6 +5,7 @@
 
 import express, { Request, Response } from 'express';
 import crypto from 'crypto';
+import { assertSafeOutboundUrl } from './urlGuard';
 
 const router = express.Router();
 
@@ -93,6 +94,27 @@ function sendSSE(res: Response, event: string, data: any): void {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// 上游请求超时（等待响应头）。给慢速/冷启动上游留足时间，同时避免连接永久悬挂
+const UPSTREAM_TIMEOUT = 120000;
+
+/**
+ * 统一的上游 fetch 封装：
+ *  - 超时未拿到响应头则中止，避免连接永久悬挂
+ *  - 若传入 res（SSE 客户端），客户端断开时立即中止上游，释放连接与配额
+ * 返回原生 fetch Response；调用方负责读取 body。
+ */
+async function fetchUpstream(url: string, init: RequestInit, res?: Response): Promise<globalThis.Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error(`上游响应超时 (${UPSTREAM_TIMEOUT / 1000}s)`)), UPSTREAM_TIMEOUT);
+  const onClose = () => controller.abort(new Error('客户端已断开'));
+  if (res) res.on('close', onClose);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ===== OpenAI 格式适配（OpenAI / DeepSeek / Azure / 自定义均走此格式） =====
 async function callOpenAIFormat(
   baseUrl: string,
@@ -107,11 +129,11 @@ async function callOpenAIFormat(
     Authorization: `Bearer ${apiKey}`,
   };
 
-  const response = await fetch(url, {
+  const response = await fetchUpstream(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({ ...body, stream }),
-  });
+  }, res);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -215,11 +237,11 @@ async function callAnthropicFormat(
   };
   if (systemContent) anthropicBody.system = systemContent;
 
-  const response = await fetch(url, {
+  const response = await fetchUpstream(url, {
     method: 'POST',
     headers,
     body: JSON.stringify(anthropicBody),
-  });
+  }, res);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -335,11 +357,11 @@ async function callGoogleFormat(
     geminiBody.systemInstruction = { parts: [{ text: systemContent }] };
   }
 
-  const response = await fetch(url, {
+  const response = await fetchUpstream(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(geminiBody),
-  });
+  }, res);
 
   if (!response.ok) {
     const errorText = await response.text();
@@ -627,7 +649,7 @@ function streamOpenAIRound(
       'Content-Type': 'application/json',
       Authorization: `Bearer ${apiKey}`,
     };
-    fetch(url, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) })
+    fetchUpstream(url, { method: 'POST', headers, body: JSON.stringify({ ...body, stream: true }) }, res)
       .then(async (response) => {
         if (!response.ok) {
           const errorText = await response.text();
@@ -858,6 +880,7 @@ router.post('/models', async (req: Request, res: Response) => {
     if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
       return res.status(400).json({ success: false, message: 'baseUrl 格式无效' });
     }
+    if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
     const models = await fetchProviderModels(provider, apiKey, baseUrl || '');
     res.json({ success: true, models });
   } catch (err: any) {
@@ -873,6 +896,7 @@ router.post('/test', async (req: Request, res: Response) => {
     if (!provider || !apiKey) {
       return res.status(400).json({ success: false, message: '缺少 provider 或 apiKey' });
     }
+    if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
 
     const startTime = Date.now();
 
@@ -963,6 +987,7 @@ router.post('/chat', async (req: Request, res: Response) => {
   if (tools && tools.length > 0) body.tools = tools;
 
   try {
+    if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
     // Phase 6：配置了工具时走 Agentic 工具循环（LLM 可能返回 tool_calls）
     if (tools && tools.length > 0) {
       const content = await runAgenticLoop(provider, baseUrl, resolvedApiKey, body);
@@ -1026,6 +1051,7 @@ router.post('/chat/stream', async (req: Request, res: Response) => {
   if (tools && tools.length > 0) body.tools = tools;
 
   try {
+    if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
     // Phase 7：配置了工具时走流式 Agentic 工具循环（逐轮流式 + 实时工具事件）
     if (tools && tools.length > 0) {
       await streamAgenticLoop(provider, baseUrl, resolvedApiKey, body, res);

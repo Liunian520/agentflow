@@ -197,28 +197,27 @@ export async function testChannelConnection(payload: {
 }
 
 export async function chatLLM(options: LLMChatOptions): Promise<LLMChatResult> {
-  const response = await fetch(`${API_BASE}/llm/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      channelId: options.channelId,
-      provider: options.provider,
-      baseUrl: options.baseUrl,
-      apiKey: options.apiKey,
-      model: options.model,
-      messages: options.messages,
-      temperature: options.temperature,
-      maxTokens: options.maxTokens,
-      tools: options.tools,
-    }),
-  });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`LLM API 请求失败 (${response.status}): ${err.slice(0, 200)}`);
-  }
-
-  return response.json();
+  // 非流式聊天可能较慢（含工具循环），给 120s 超时，仍复用 safeFetch 的超时/重试/错误封装
+  return safeFetch<LLMChatResult>(
+    `${API_BASE}/llm/chat`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        channelId: options.channelId,
+        provider: options.provider,
+        baseUrl: options.baseUrl,
+        apiKey: options.apiKey,
+        model: options.model,
+        messages: options.messages,
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        tools: options.tools,
+      }),
+    },
+    120000,
+    1,
+  );
 }
 
 // ===== SSE 流式调用 =====
@@ -319,6 +318,25 @@ export function chatLLMStream(options: LLMChatOptions, callbacks: SSECallbacks):
 export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECallbacks): AbortController {
   const controller = new AbortController();
 
+  // settled 守卫：确保 onDone / onError 生命周期仅触发一次，并统一清理兜底 timer
+  let settled = false;
+  let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearFallback = () => {
+    if (fallbackTimer) { clearTimeout(fallbackTimer); fallbackTimer = null; }
+  };
+  const safeDone = (data: any) => {
+    if (settled) return;
+    settled = true;
+    clearFallback();
+    callbacks.onDone?.(data);
+  };
+  const safeError = (data: any) => {
+    if (settled) return;
+    settled = true;
+    clearFallback();
+    callbacks.onError?.(data);
+  };
+
   fetch(`${API_BASE}/llm/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -338,13 +356,13 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
     .then(async (response) => {
       if (!response.ok) {
         const err = await response.text();
-        callbacks.onError?.({ message: `请求失败 (${response.status}): ${err.slice(0, 200)}`, status: response.status });
+        safeError({ message: `请求失败 (${response.status}): ${err.slice(0, 200)}`, status: response.status });
         return;
       }
 
       const reader = response.body?.getReader();
       if (!reader) {
-        callbacks.onError?.({ message: '无法读取流式响应' });
+        safeError({ message: '无法读取流式响应' });
         return;
       }
 
@@ -386,10 +404,10 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
                 callbacks.onDelta?.(data);
                 break;
               case 'done':
-                callbacks.onDone?.(data);
+                safeDone(data);
                 break;
               case 'error':
-                callbacks.onError?.(data);
+                safeError(data);
                 break;
               case 'tool':
                 callbacks.onTool?.(data);
@@ -400,22 +418,28 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
           }
         }
       }
+
+      // 流自然结束但后端未发送 done 事件 → 兜底触发一次 onDone
+      safeDone({ content: '' });
     })
     .catch((err) => {
       if (err.name !== 'AbortError') {
-        callbacks.onError?.({ message: err.message });
+        safeError({ message: err.message });
+      } else {
+        // 主动中止：清理 timer，不再重复回调
+        clearFallback();
       }
     });
 
-  // 兜底：5 分钟后如果流还没有 onDone，强制结束（防止永远卡住）
-  const fallbackTimer = setTimeout(() => {
+  // 兜底：5 分钟后如果流还没有结束，强制收尾（防止永远卡住）
+  fallbackTimer = setTimeout(() => {
     if (!controller.signal.aborted) {
       controller.abort();
-      callbacks.onDone?.({ content: '' });
     }
+    safeDone({ content: '' });
   }, 300000);
 
-  controller.signal.addEventListener('abort', () => clearTimeout(fallbackTimer));
+  controller.signal.addEventListener('abort', clearFallback);
 
   return controller;
 }

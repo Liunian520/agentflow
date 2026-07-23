@@ -1270,7 +1270,7 @@ export function SettingsPage() {
                 ))}
               </div>
               <p className="text-xs text-text-tertiary mt-3">
-                💡 深色主题目前为预留选项，界面样式将随版本迭代逐步适配。
+                💡 深色主题已实装，点击下方选项即可实时切换明暗外观；选择「跟随系统」会随操作系统外观自动变化。
               </p>
             </div>
 

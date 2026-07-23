@@ -11,6 +11,7 @@
 
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
+import { assertSafeOutboundUrl } from './urlGuard';
 
 const router = Router();
 
@@ -331,6 +332,7 @@ router.post('/a2a/discover', async (req: Request, res: Response) => {
     if (!agentUrl) {
       return res.status(400).json({ success: false, message: '缺少 agentUrl 参数' });
     }
+    await assertSafeOutboundUrl(agentUrl, 'agentUrl');
 
     const card = await discoverAgentCard(agentUrl, headers);
     res.json({ success: true, agentCard: card });
@@ -347,6 +349,7 @@ router.post('/a2a/send', async (req: Request, res: Response) => {
     if (!agentUrl || !message) {
       return res.status(400).json({ success: false, message: '缺少 agentUrl 或 message 参数' });
     }
+    await assertSafeOutboundUrl(agentUrl, 'agentUrl');
 
     const result = await sendTask({ agentUrl, message, taskId, skillId, headers });
     res.json({ success: true, ...result });
@@ -363,6 +366,7 @@ router.post('/a2a/stream', async (req: Request, res: Response) => {
     if (!agentUrl || !message) {
       return res.status(400).json({ success: false, message: '缺少 agentUrl 或 message 参数' });
     }
+    await assertSafeOutboundUrl(agentUrl, 'agentUrl');
 
     await streamTask({ agentUrl, message, taskId, skillId, headers }, res);
   } catch (err: any) {

@@ -32,6 +32,22 @@ export class SSHService {
 
       const client = new Client();
 
+      // 防止 ready/error/超时 竞态导致的重复 resolve
+      let settled = false;
+      const CONNECT_TIMEOUT = 20000;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { client.end(); } catch { /* noop */ }
+        resolve({ success: false, message: `连接超时 (${CONNECT_TIMEOUT / 1000}s)，请检查主机地址、端口与网络` });
+      }, CONNECT_TIMEOUT);
+      const done = (r: { success: boolean; message: string }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(r);
+      };
+
       client.on('ready', () => {
         const connInfo: ConnectionInfo = {
           client,
@@ -40,12 +56,12 @@ export class SSHService {
           lastUsed: new Date(),
         };
         this.connections.set(hostId, connInfo);
-        resolve({ success: true, message: '连接成功' });
+        done({ success: true, message: '连接成功' });
       });
 
       client.on('error', (err) => {
-        client.end();
-        resolve({ success: false, message: err.message });
+        try { client.end(); } catch { /* noop */ }
+        done({ success: false, message: err.message });
       });
 
       client.on('close', () => {
@@ -60,6 +76,7 @@ export class SSHService {
         host: config.host,
         port: config.port,
         username: config.username,
+        readyTimeout: CONNECT_TIMEOUT,
       };
 
       if (config.authType === 'password' && config.password) {
@@ -68,7 +85,11 @@ export class SSHService {
         authMethods.privateKey = Buffer.from(config.privateKey, 'base64').toString('utf-8');
       }
 
-      client.connect(authMethods);
+      try {
+        client.connect(authMethods);
+      } catch (e: any) {
+        done({ success: false, message: e?.message || '连接发起失败' });
+      }
     });
   }
 
