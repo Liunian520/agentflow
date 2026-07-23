@@ -3,7 +3,7 @@ import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
   Trash2, Clock, Lightbulb,
   Paperclip, FileText, X, Image as ImageIcon,
-  Cpu, Zap, Plug, ShieldCheck,
+  Cpu, Zap, Plug, ShieldCheck, ChevronDown,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
@@ -25,7 +25,7 @@ import { MEMORY_TOOL_SCHEMAS, executeMemoryTool } from '../lib/memory/selfEditin
 import { AgentCard } from '../components/chat/cards/AgentCard';
 import { WorkflowPreview } from '../components/chat/cards/WorkflowPreview';
 import { Clarification } from '../components/chat/cards/Clarification';
-import { ModeSelector, getModeConfig } from '../components/chat/ModeSelector';
+import { MODE_CONFIGS, getModeConfig } from '../components/chat/ModeSelector';
 import { SlashCommandBar, slashCommands } from '../components/chat/SlashCommandBar';
 import { TaskTracker, generateTaskSteps } from '../components/chat/TaskTracker';
 import { ThinkingIndicator, generateThinkingSteps } from '../components/chat/ThinkingIndicator';
@@ -194,6 +194,15 @@ export function ChatWorkspacePage() {
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [showSessionMenu]);
+
+  // 输入框内模式切换下拉
+  const [showModeMenu, setShowModeMenu] = useState(false);
+  useEffect(() => {
+    if (!showModeMenu) return;
+    const close = () => setShowModeMenu(false);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [showModeMenu]);
 
   // 任务追踪状态
   const [activeTaskSteps, setActiveTaskSteps] = useState<TaskStep[]>([]);
@@ -1740,7 +1749,6 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                 })()}
               </span>
             ) : null}
-            <ModeSelector activeMode={activeMode} onModeChange={setActiveMode} />
             <span
               className="hidden sm:flex items-center gap-1 px-2 py-1 text-xs rounded-full bg-bg-secondary text-text-tertiary border border-border"
               title="Meta-Skill 编排策略版本，随反思进化自动升级"
@@ -1995,13 +2003,56 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                 style={{ height: 'auto', minHeight: '24px' }}
               />
 
-              {/* 右侧工具：连接器引用 + 执行权限 */}
+              {/* 右侧工具：模式切换 + 连接器引用 + 执行权限 */}
               <div className="flex items-center gap-1 shrink-0">
+                {/* 模式切换下拉（从顶栏移入输入框） */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setShowModeMenu(v => !v); setShowConnectorMenu(false); setShowAttachMenu(false); }}
+                    className={cn(
+                      'flex items-center gap-1 px-2 py-2 rounded-lg transition-colors',
+                      showModeMenu ? 'text-accent bg-accent/10' : 'text-text-tertiary hover:text-accent hover:bg-bg-hover'
+                    )}
+                    title={`当前模式：${modeConfig.label} — ${modeConfig.description}`}
+                  >
+                    <span className="text-sm leading-none">{modeConfig.icon}</span>
+                    <span className="hidden sm:inline text-xs font-medium">{modeConfig.label}</span>
+                    <ChevronDown className="w-3 h-3" />
+                  </button>
+                  {showModeMenu && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute bottom-full right-0 mb-2 w-48 rounded-xl border border-border bg-bg-primary shadow-xl py-1 z-30"
+                    >
+                      {MODE_CONFIGS.map((m) => (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => { setActiveMode(m.id); setShowModeMenu(false); }}
+                          className={cn(
+                            'w-full flex items-start gap-2 px-3 py-2 text-left transition-colors',
+                            activeMode === m.id ? 'bg-accent/10' : 'hover:bg-bg-hover'
+                          )}
+                        >
+                          <span className="text-base leading-none mt-0.5">{m.icon}</span>
+                          <div className="min-w-0">
+                            <div className={cn('text-sm', activeMode === m.id ? 'text-accent font-medium' : 'text-text-secondary')}>
+                              {m.label}
+                            </div>
+                            <div className="text-xs text-text-tertiary leading-snug">{m.description}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
                 {/* 连接器（MCP）引用菜单 */}
                 <div className="relative">
                   <button
                     type="button"
-                    onClick={() => { setShowConnectorMenu(v => !v); setShowAttachMenu(false); }}
+                    onClick={() => { setShowConnectorMenu(v => !v); setShowAttachMenu(false); setShowModeMenu(false); }}
                     className={cn(
                       'p-2 rounded-lg transition-colors',
                       showConnectorMenu ? 'bg-accent/10 text-accent' : 'text-text-tertiary hover:text-accent hover:bg-bg-hover'
