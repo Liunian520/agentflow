@@ -3,7 +3,7 @@ import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
   Trash2, Clock, Lightbulb,
   Paperclip, FileText, X, Image as ImageIcon,
-  Cpu, Zap, Plug, ShieldCheck, ChevronDown,
+  Cpu, Zap, Plug, ShieldCheck, ChevronDown, Check,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
@@ -129,7 +129,7 @@ function generateResponse(intent: ParsedIntent, result: ActionResult, mode: Agen
 // ===== 主页面组件 =====
 
 export function ChatWorkspacePage() {
-  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled, mcps } = useStore();
+  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled, mcps, setDefaultModelId, setRouterEnabled } = useStore();
 
   // 最近一次路由决策使用的模型信息（来自 onRouting 回调）
   const [lastUsedModel, setLastUsedModel] = useState<{ provider: string; model: string; displayName?: string } | null>(null);
@@ -242,6 +242,40 @@ export function ChatWorkspacePage() {
   const [refSelection, setRefSelection] = useState<string[]>([]);
   // 连接器下拉
   const [showConnectorMenu, setShowConnectorMenu] = useState(false);
+  // 输入框模型选择下拉
+  const [showModelMenu, setShowModelMenu] = useState(false);
+  useEffect(() => {
+    if (!showModelMenu) return;
+    const close = () => setShowModelMenu(false);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [showModelMenu]);
+  // 输入框可选模型列表（来自所有启用渠道，去重）
+  const modelOptions = useMemo(() => {
+    const list: Array<{ key: string; channelId: string; channelName: string; modelName: string; displayName: string }> = [];
+    const seen = new Set<string>();
+    for (const ch of channels) {
+      if (!ch.enabled || !ch.apiKey) continue;
+      for (const m of ch.models) {
+        if (!m.name) continue;
+        const key = `${ch.id}:${m.name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        list.push({
+          key,
+          channelId: ch.id,
+          channelName: ch.name,
+          modelName: m.name,
+          displayName: m.displayName || m.name,
+        });
+      }
+    }
+    return list;
+  }, [channels]);
+  const currentModelKey = defaultModelId ?? null;
+  const currentModelLabel = currentModelKey
+    ? (modelOptions.find((m) => m.key === currentModelKey)?.displayName || '已选模型')
+    : '自动路由';
   // 执行权限：允许完全访问（自动执行，跳过确认）
   const [allowFullAccess, setAllowFullAccess] = useState(false);
   // 用 ref 持有最新的 handleLLMStream，避免 processUserInput 因声明顺序/依赖问题拿到过期闭包
@@ -2003,8 +2037,90 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                 style={{ height: 'auto', minHeight: '24px' }}
               />
 
-              {/* 右侧工具：模式切换 + 连接器引用 + 执行权限 */}
+              {/* 右侧工具：模型选择 + 模式切换 + 连接器引用 + 执行权限 */}
               <div className="flex items-center gap-1 shrink-0">
+                {/* 模型选择下拉 */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); setShowModelMenu(v => !v); setShowModeMenu(false); setShowConnectorMenu(false); setShowAttachMenu(false); }}
+                    className={cn(
+                      'flex items-center gap-1 px-2 py-2 rounded-lg transition-colors',
+                      showModelMenu ? 'text-accent bg-accent/10' : 'text-text-tertiary hover:text-accent hover:bg-bg-hover'
+                    )}
+                    title={routerEnabled ? '当前：自动路由' : `当前：${currentModelLabel}`}
+                  >
+                    <Cpu className="w-4 h-4" />
+                    <span className="hidden sm:inline text-xs font-medium max-w-[80px] truncate">
+                      {routerEnabled ? '自动' : currentModelLabel}
+                    </span>
+                    <ChevronDown className="w-3 h-3" />
+                  </button>
+                  {showModelMenu && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className="absolute bottom-full right-0 mb-2 w-56 rounded-xl border border-border bg-bg-primary shadow-xl py-1 z-30 max-h-64 overflow-y-auto"
+                    >
+                      {/* 自动路由选项 */}
+                      <button
+                        type="button"
+                        onClick={() => { setRouterEnabled(true); setDefaultModelId(null); setShowModelMenu(false); }}
+                        className={cn(
+                          'w-full flex items-center gap-2 px-3 py-2 text-left transition-colors',
+                          routerEnabled ? 'bg-accent/10' : 'hover:bg-bg-hover'
+                        )}
+                      >
+                        <Zap className="w-4 h-4 shrink-0 text-accent" />
+                        <div className="min-w-0">
+                          <div className={cn('text-sm', routerEnabled ? 'text-accent font-medium' : 'text-text-secondary')}>
+                            自动路由
+                          </div>
+                          <div className="text-xs text-text-tertiary">智能匹配最佳模型</div>
+                        </div>
+                        {routerEnabled && <Check className="w-4 h-4 text-accent shrink-0 ml-auto" />}
+                      </button>
+                      <div className="h-px bg-border mx-2 my-1" />
+                      {/* 按渠道分组的模型列表 */}
+                      {modelOptions.length === 0 && (
+                        <p className="px-3 py-2 text-xs text-text-tertiary">暂无可用模型，请在渠道设置中添加</p>
+                      )}
+                      {/* 先按渠道分组 */}
+                      {(() => {
+                        const groups = new Map<string, Array<typeof modelOptions[0]>>();
+                        for (const m of modelOptions) {
+                          if (!groups.has(m.channelId)) groups.set(m.channelId, []);
+                          groups.get(m.channelId)!.push(m);
+                        }
+                        return Array.from(groups.entries()).map(([channelId, models]) => (
+                          <div key={channelId}>
+                            <p className="px-3 pt-1.5 pb-0.5 text-xs font-semibold text-text-tertiary truncate">{models[0].channelName}</p>
+                            {models.map((m) => {
+                              const isSelected = !routerEnabled && currentModelKey === m.key;
+                              return (
+                                <button
+                                  key={m.key}
+                                  type="button"
+                                  onClick={() => { setRouterEnabled(false); setDefaultModelId(m.key); setShowModelMenu(false); }}
+                                  className={cn(
+                                    'w-full flex items-center gap-2 px-3 py-1.5 text-left transition-colors',
+                                    isSelected ? 'bg-accent/10' : 'hover:bg-bg-hover'
+                                  )}
+                                >
+                                  <Cpu className="w-3.5 h-3.5 shrink-0 text-text-tertiary" />
+                                  <span className={cn('text-sm truncate', isSelected ? 'text-accent font-medium' : 'text-text-secondary')}>
+                                    {m.displayName}
+                                  </span>
+                                  {isSelected && <Check className="w-3.5 h-3.5 text-accent shrink-0 ml-auto" />}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  )}
+                </div>
+
                 {/* 模式切换下拉（从顶栏移入输入框） */}
                 <div className="relative">
                   <button
@@ -2125,7 +2241,7 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             </div>
             <div className="flex items-center justify-between mt-2">
               <p className="text-xs text-text-tertiary">
-                {modeConfig.icon} {modeConfig.label} · {allowFullAccess
+                {modeConfig.icon} {modeConfig.label} · {routerEnabled ? '自动路由' : currentModelLabel} · {allowFullAccess
                   ? '完全访问（自动执行）'
                   : modeConfig.behavior === 'analyze_only' ? (activeMode === 'ask' ? '纯问答' : '仅规划') : modeConfig.behavior === 'execute_auto' ? '自动执行' : '执行需确认'}
               </p>
