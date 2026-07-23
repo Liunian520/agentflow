@@ -34,6 +34,8 @@ jobs:
         env:
           # 优先使用仓库变量；若未设置则回退到当前 Render 实例的真实地址
           VITE_API_BASE: ${{ vars.VITE_API_BASE || 'https://agentflow-server-71j2.onrender.com/api' }}
+          # 注入构建版本号，方便前端确认当前部署的是哪次提交
+          VITE_BUILD_VERSION: ${{ github.sha }}
 
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1

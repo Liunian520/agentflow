@@ -21,6 +21,7 @@ import { rolloutMultiplePlans, evaluatePlansQuality } from '../lib/multiTrajecto
 import { extractTaskFeatures } from '../lib/modelRouter';
 import { designWorkflowFromDescription, modifyWorkflowWithDescription, applyWorkflowModification } from '../lib/llmWorkflowDesigner';
 import { getMemoryManager } from '../lib/memory';
+import { BUILD_VERSION, shortVersion } from '../lib/version';
 import { MEMORY_TOOL_SCHEMAS, executeMemoryTool } from '../lib/memory/selfEditing';
 import { AgentCard } from '../components/chat/cards/AgentCard';
 import { WorkflowPreview } from '../components/chat/cards/WorkflowPreview';
@@ -129,7 +130,7 @@ function generateResponse(intent: ParsedIntent, result: ActionResult, mode: Agen
 // ===== 主页面组件 =====
 
 export function ChatWorkspacePage() {
-  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled, mcps, setDefaultModelId, setRouterEnabled } = useStore();
+  const { agents, workflows, channels, defaultModelId, routerEnabled, mcps, setDefaultModelId, setRouterEnabled } = useStore();
 
   // 最近一次路由决策使用的模型信息（来自 onRouting 回调）
   const [lastUsedModel, setLastUsedModel] = useState<{ provider: string; model: string; displayName?: string } | null>(null);
@@ -1785,9 +1786,9 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             ) : null}
             <span
               className="hidden sm:flex items-center gap-1 px-2 py-1 text-xs rounded-full bg-bg-secondary text-text-tertiary border border-border"
-              title="Meta-Skill 编排策略版本，随反思进化自动升级"
+              title={`构建版本：${BUILD_VERSION}`}
             >
-              🧬 v{metaSkill.version}
+              🧬 {shortVersion(BUILD_VERSION)}
             </span>
             <button
               onClick={handleNewSession}
