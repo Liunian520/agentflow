@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
-  Trash2, ChevronLeft, ChevronRight, Lightbulb,
+  Trash2, Clock, Lightbulb,
   Paperclip, FileText, X, Image as ImageIcon,
   Cpu, Zap, Plug, ShieldCheck,
 } from 'lucide-react';
@@ -185,8 +185,15 @@ export function ChatWorkspacePage() {
     }
   }, [activeSessionId]);
   const [inputValue, setInputValue] = useState('');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
+  // 顶部历史会话下拉（替代左侧固定侧栏）
+  const [showSessionMenu, setShowSessionMenu] = useState(false);
+  useEffect(() => {
+    if (!showSessionMenu) return;
+    const close = () => setShowSessionMenu(false);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [showSessionMenu]);
 
   // 任务追踪状态
   const [activeTaskSteps, setActiveTaskSteps] = useState<TaskStep[]>([]);
@@ -1601,81 +1608,6 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
 
   return (
     <div className="flex-1 flex overflow-hidden h-full">
-      {/* 侧栏 */}
-      <div className={cn(
-        'hidden md:flex flex-col bg-white border-r border-border transition-all duration-300',
-        sidebarOpen ? 'w-64' : 'w-0 overflow-hidden'
-      )}>
-        <div className="h-14 flex items-center justify-between px-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-accent" />
-            <span className="font-semibold text-text-primary">对话工作台</span>
-          </div>
-          <button
-            onClick={handleNewSession}
-            className="p-1.5 bg-accent hover:bg-accent-hover text-white rounded-md transition-colors active:scale-[0.98]"
-            title="新建对话"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              onClick={() => setActiveSessionId(session.id)}
-              className={cn(
-                'w-full flex items-center gap-3 p-3 rounded-lg text-left transition-colors group',
-                activeSessionId === session.id
-                  ? 'bg-accent-bg'
-                  : 'hover:bg-bg-secondary'
-              )}
-            >
-              <MessageSquare className="w-4 h-4 text-text-tertiary flex-shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="text-sm font-medium text-text-primary truncate">{session.title}</div>
-                <div className="text-xs text-text-tertiary">
-                  {session.messages.length} 条 · {session.mode || 'code'} 模式
-                </div>
-              </div>
-              <button
-                onClick={(e) => { e.stopPropagation(); handleDeleteSession(session.id); }}
-                className="p-1 rounded-md text-text-tertiary hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all"
-                title="删除对话"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </button>
-          ))}
-        </div>
-
-        <div className="p-3 border-t border-border space-y-2">
-          <div className="text-xs font-medium text-text-tertiary uppercase tracking-wider">快捷入口</div>
-          <button
-            onClick={() => {/* navigate to workflows */}}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-          >
-            <Workflow className="w-4 h-4" />
-            工作流列表 ({workflows.length})
-          </button>
-          <button
-            onClick={() => {/* navigate to agents */}}
-            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-secondary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
-          >
-            <Bot className="w-4 h-4" />
-            Agent 列表 ({agents.length})
-          </button>
-        </div>
-      </div>
-
-      <button
-        onClick={() => setSidebarOpen(!sidebarOpen)}
-        className="hidden md:flex items-center justify-center w-6 bg-bg-secondary border-r border-border hover:bg-bg-hover transition-colors"
-      >
-        {sidebarOpen ? <ChevronLeft className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-      </button>
-
       {/* 主对话区 */}
       <div className="flex-1 flex flex-col bg-bg-secondary">
         {/* 顶栏 — 模式选择器 + 模型指示器 */}
@@ -1697,6 +1629,86 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             </span>
           </div>
           <div className="flex items-center gap-2">
+            {/* 历史会话下拉（替代左侧固定侧栏） */}
+            <div className="relative">
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setShowSessionMenu(v => !v); }}
+                className={cn(
+                  'flex items-center gap-1.5 px-2.5 py-1.5 text-sm rounded-lg transition-colors',
+                  showSessionMenu
+                    ? 'bg-accent/10 text-accent'
+                    : 'text-text-secondary hover:text-text-primary hover:bg-bg-secondary'
+                )}
+                title="历史提问"
+              >
+                <Clock className="w-4 h-4" />
+                <span className="hidden sm:inline">历史提问</span>
+                <span className="text-xs text-text-tertiary">({sessions.length})</span>
+              </button>
+              {showSessionMenu && (
+                <div
+                  onClick={(e) => e.stopPropagation()}
+                  className="absolute top-full right-0 mt-2 w-72 rounded-xl border border-border bg-bg-primary shadow-xl py-2 z-40 max-h-[70vh] overflow-y-auto"
+                >
+                  <div className="flex items-center justify-between px-3 pb-2 border-b border-border">
+                    <span className="text-sm font-semibold text-text-primary">历史提问 ({sessions.length})</span>
+                    <button
+                      type="button"
+                      onClick={() => { handleNewSession(); setShowSessionMenu(false); }}
+                      className="p-1 text-text-tertiary hover:text-accent rounded-md transition-colors"
+                      title="新建对话"
+                    >
+                      <Plus className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="py-1">
+                    {sessions.slice(0, 50).map((session) => (
+                      <button
+                        key={session.id}
+                        onClick={() => { setActiveSessionId(session.id); setShowSessionMenu(false); }}
+                        className={cn(
+                          'w-full flex items-center gap-2 px-3 py-2 text-left transition-colors group',
+                          activeSessionId === session.id
+                            ? 'bg-accent/10'
+                            : 'hover:bg-bg-secondary'
+                        )}
+                      >
+                        <MessageSquare className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                        <div className="flex-1 min-w-0">
+                          <div className={cn(
+                            'text-sm truncate',
+                            activeSessionId === session.id ? 'text-accent font-medium' : 'text-text-secondary'
+                          )}>
+                            {session.title}
+                          </div>
+                          <div className="text-xs text-text-tertiary">
+                            {session.messages.length} 条 · {session.mode || 'code'}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); handleDeleteSession(session.id); }}
+                          className="p-1 rounded-md text-text-tertiary hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all"
+                          title="删除对话"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </button>
+                    ))}
+                    {sessions.length === 0 && (
+                      <p className="px-3 py-4 text-sm text-text-tertiary text-center">暂无历史对话</p>
+                    )}
+                  </div>
+                  {sessions.length > 50 && (
+                    <p className="px-3 pt-2 pb-1 text-xs text-text-tertiary border-t border-border">
+                      会话记录较长，仅展示最近 50 条，更早的提问已省略
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* 模型指示器 */}
             {lastUsedModel ? (
               <span
