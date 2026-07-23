@@ -401,6 +401,17 @@ export interface Agent {
   maxTokens?: number;
 }
 
+/** 消息附件：用户上传或对话中引用的文件，随消息持久化 */
+export interface FileAttachment {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  kind: 'text' | 'image' | 'other';
+  content?: string;    // 文本/代码文件内容
+  preview?: string;    // 图片预览 dataURL
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -413,6 +424,8 @@ export interface ChatMessage {
   // 对话式编程扩展字段
   messageType?: 'text' | 'agent_card' | 'workflow_preview' | 'action_confirm' | 'clarification' | 'execution_result' | 'ssh_result' | 'node_config';
   metadata?: Record<string, any>;
+  // 随消息持久化的附件（对齐 WorkBuddy 的「添加文件 / 引用对话中的文件」）
+  attachments?: FileAttachment[];
 }
 
 export interface Plugin {

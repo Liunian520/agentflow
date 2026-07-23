@@ -1,16 +1,16 @@
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Send, Plus, Sparkles, MessageSquare, Bot, Workflow,
   Trash2, ChevronLeft, ChevronRight, Lightbulb,
   Paperclip, FileText, X, Image as ImageIcon,
-  Cpu, Zap,
+  Cpu, Zap, Plug, ShieldCheck,
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
 import type {
   ChatMessage, ParsedIntent, ActionResult, Agent, Workflow as WorkflowType,
   AgentMode, ChatSession, TaskStep, ThinkingStep, ApprovalRequest, SlashCommand,
-  OrchestrationPlan,
+  OrchestrationPlan, FileAttachment,
 } from '../types';
 import { parseIntent } from '../components/chat/intent/IntentParser';
 import { executeAction } from '../components/chat/intent/actionExecutor';
@@ -35,16 +35,8 @@ import { getAvailableChannelFromStore, routedChatLLMStream } from '../api/llmApi
 import { ProjectDirPanel, type FileNode, type FileChange } from '../components/chat/ProjectDirPanel';
 import { RouterDashboard } from '../components/chat/cards/RouterDashboard';
 
-/** 用户上传的文件，作为单次对话的上下文 */
-interface UploadedFile {
-  id: string;
-  name: string;
-  size: number;
-  type: string;
-  kind: 'text' | 'image' | 'other';
-  content?: string;   // 文本/代码文件内容
-  preview?: string;   // 图片预览 dataURL
-}
+/** 用户上传的文件，作为单次对话的上下文（与消息中持久化的 FileAttachment 同构） */
+type UploadedFile = FileAttachment;
 
 // 预置快捷建议
 const quickSuggestions = [
@@ -137,7 +129,7 @@ function generateResponse(intent: ParsedIntent, result: ActionResult, mode: Agen
 // ===== 主页面组件 =====
 
 export function ChatWorkspacePage() {
-  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled } = useStore();
+  const { agents, workflows, metaSkill, channels, defaultModelId, routerEnabled, mcps } = useStore();
 
   // 最近一次路由决策使用的模型信息（来自 onRouting 回调）
   const [lastUsedModel, setLastUsedModel] = useState<{ provider: string; model: string; displayName?: string } | null>(null);
@@ -228,6 +220,14 @@ export function ChatWorkspacePage() {
   // ===== 上传文件（作为对话上下文） =====
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // 输入框「+」附件菜单：添加文件 / 引用对话中的文件
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showRefPicker, setShowRefPicker] = useState(false);
+  const [refSelection, setRefSelection] = useState<string[]>([]);
+  // 连接器下拉
+  const [showConnectorMenu, setShowConnectorMenu] = useState(false);
+  // 执行权限：允许完全访问（自动执行，跳过确认）
+  const [allowFullAccess, setAllowFullAccess] = useState(false);
   // 用 ref 持有最新的 handleLLMStream，避免 processUserInput 因声明顺序/依赖问题拿到过期闭包
   const handleLLMStreamRef = useRef<((text: string, intent: ParsedIntent, userMsg: ChatMessage) => void) | null>(null);
 
@@ -405,8 +405,36 @@ export function ChatWorkspacePage() {
     return parts.join('\n\n');
   };
 
+  // 引用对话中的文件：把勾选的历史附件加入当前上下文
+  const confirmRefAttachments = () => {
+    const picked = conversationAttachments.filter((a) => refSelection.includes(a.id));
+    setUploadedFiles((prev) => {
+      const existing = new Set(prev.map((f) => f.id));
+      return [...prev, ...picked.filter((p) => !existing.has(p.id))];
+    });
+    setRefSelection([]);
+    setShowRefPicker(false);
+    setShowAttachMenu(false);
+  };
+
+  // 在输入框插入引用标记（@agent / @workflow / @mcp），对齐 WorkBuddy 的引用式交互
+  const insertRef = (text: string) => {
+    setInputValue((prev) => (prev ? `${prev} ${text}` : text));
+    setShowConnectorMenu(false);
+    textareaRef.current?.focus();
+  };
+
   const activeSession = sessions.find(s => s.id === activeSessionId);
   const activeMessages = activeSession?.messages || [];
+
+  // 从对话历史收集所有附件（用于「引用对话中的文件」）
+  const conversationAttachments = useMemo(() => {
+    const map = new Map<string, FileAttachment>();
+    activeMessages.forEach((m) => (m.attachments || []).forEach((a) => {
+      if (!map.has(a.id)) map.set(a.id, a);
+    }));
+    return Array.from(map.values());
+  }, [activeMessages]);
 
   const modeConfig = getModeConfig(activeMode);
 
@@ -510,10 +538,13 @@ export function ChatWorkspacePage() {
       content: text.trim(),
       timestamp: new Date().toISOString(),
       messageType: 'text',
+      // 把本次输入框中的附件随消息持久化，刷新/重新打开会话后仍在
+      attachments: uploadedFiles.length > 0 ? uploadedFiles.map((f) => ({ ...f })) : undefined,
     };
 
     updateSessionMessages(activeSessionId, [...activeMessages, userMsg]);
     setInputValue('');
+    setUploadedFiles([]);
     setIsProcessing(true);
 
     // 1. 快速层：IntentParser 关键词匹配
@@ -567,7 +598,8 @@ export function ChatWorkspacePage() {
     }
 
     // 7. 检查是否需要操作确认
-    const approval = needsApproval(intent.action, activeMode);
+    // 「允许完全访问」开启时跳过操作确认，与 WorkBuddy 的 auto-run 权限一致
+    const approval = allowFullAccess ? null : needsApproval(intent.action, activeMode);
     if (approval) {
       approval.details = {
         名称: intent.params.name || '-',
@@ -768,8 +800,8 @@ export function ChatWorkspacePage() {
   // ===== 统一落地 Meta-Agent 编排计划 =====
   // 负责：审批判定 → 执行 → 记录真实轨迹 → 失败后反思进化
   const finalizeMetaPlan = useCallback(async (plan: OrchestrationPlan, userInput: string, userMsg: ChatMessage) => {
-    // 检查是否需要操作确认
-    const approval = needsApproval(plan.intent as any, activeMode);
+    // 检查是否需要操作确认（允许完全访问时跳过）
+    const approval = allowFullAccess ? null : needsApproval(plan.intent as any, activeMode);
     if (approval && (plan.agents.length > 0 || plan.workflow)) {
       const request: ApprovalRequest = {
         id: generateId(),
@@ -833,15 +865,19 @@ export function ChatWorkspacePage() {
     const memoryManager = getMemoryManager();
     const { recalledContext, sessionMemoryContext } = await memoryManager.onLLMCall(activeSessionId, text, activeMessages);
 
+    // 把用户上传/引用的文件作为上下文注入 Meta-Agent
+    const uploadedContext = readUploadedContext();
+
     // 生成思考过程
     const thinking = generateThinkingSteps('smart_orchestrate', activeMode, {});
     setThinkingSteps(thinking);
 
-    // 调用 Meta-Agent 进行三层编排（经验 + Dynamic Recall 注入）
+    // 调用 Meta-Agent 进行三层编排（经验 + Dynamic Recall + 上传文件 注入）
     const plan = await metaAgentOrchestrate(text, metaSkill, {
       experienceContext: expContext,
       recalledMemoryContext: recalledContext,
-      sessionMemoryContext: sessionMemoryContext,
+      sessionMemoryContext: [sessionMemoryContext, uploadedContext ? `【用户上传/引用的文件】\n${uploadedContext}` : '']
+        .filter(Boolean).join('\n\n'),
     });
 
     // Plan 模式：只展示编排方案，不执行、不记录轨迹
@@ -1789,6 +1825,24 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                     ? 'bg-accent text-white rounded-2xl rounded-tr-sm px-4 py-3'
                     : 'bg-white border border-border rounded-2xl rounded-tl-sm px-4 py-3 shadow-sm'
                 )}>
+                  {/* 消息附件（对齐 WorkBuddy 的「引用对话中的文件」） */}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-2">
+                      {msg.attachments.map((a) => (
+                        <span
+                          key={a.id}
+                          className={cn(
+                            'inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs max-w-[180px]',
+                            msg.role === 'user' ? 'bg-white/15' : 'bg-bg-secondary border border-border text-text-secondary'
+                          )}
+                          title={`${a.name} · ${(a.size / 1024).toFixed(0)}KB`}
+                        >
+                          {a.kind === 'image' ? <ImageIcon className="w-3 h-3 shrink-0" /> : <FileText className="w-3 h-3 shrink-0" />}
+                          <span className="truncate">{a.name}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {msg.role === 'user'
                     ? <p className="text-sm whitespace-pre-wrap leading-relaxed">{msg.content}</p>
                     : renderMessageContent(msg)
@@ -1869,16 +1923,48 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
               accept="*/*"
             />
 
-            <div className="flex items-end gap-2 bg-bg-secondary rounded-2xl border border-border p-2 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent transition-all">
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={isProcessing}
-                className="p-2 text-text-tertiary hover:text-accent transition-colors disabled:opacity-50 shrink-0"
-                title="上传文件作为对话上下文"
-              >
-                <Paperclip className="w-5 h-5" />
-              </button>
+            <div className="relative flex items-end gap-2 bg-bg-secondary rounded-2xl border border-border p-2 focus-within:border-accent focus-within:ring-1 focus-within:ring-accent transition-all">
+              {/* 左侧「+」附件菜单：添加文件 / 引用对话中的文件 */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => { setShowAttachMenu(v => !v); setShowConnectorMenu(false); }}
+                  disabled={isProcessing}
+                  className={cn(
+                    'p-2 rounded-lg transition-colors disabled:opacity-50 shrink-0',
+                    showAttachMenu ? 'bg-accent/10 text-accent' : 'text-text-tertiary hover:text-accent hover:bg-bg-hover'
+                  )}
+                  title="添加文件 / 引用对话中的文件"
+                >
+                  <Plus className="w-5 h-5" />
+                </button>
+                {showAttachMenu && (
+                  <div className="absolute bottom-full left-0 mb-2 w-52 rounded-xl border border-border bg-bg-primary shadow-lg py-1 z-30">
+                    <button
+                      type="button"
+                      onClick={() => { fileInputRef.current?.click(); setShowAttachMenu(false); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover transition-colors"
+                    >
+                      <Paperclip className="w-4 h-4 shrink-0" />
+                      添加文件
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setRefSelection(conversationAttachments.map(a => a.id)); setShowRefPicker(true); setShowAttachMenu(false); }}
+                      disabled={conversationAttachments.length === 0}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-text-secondary hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      title={conversationAttachments.length === 0 ? '当前对话还没有可引用的文件' : '从对话历史中引用已上传的文件'}
+                    >
+                      <MessageSquare className="w-4 h-4 shrink-0" />
+                      引用对话中的文件
+                      {conversationAttachments.length > 0 && (
+                        <span className="ml-auto text-xs text-text-tertiary">{conversationAttachments.length}</span>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <textarea
                 ref={textareaRef}
                 value={inputValue}
@@ -1896,6 +1982,71 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
                 className="flex-1 bg-transparent resize-none outline-none text-sm text-text-primary placeholder:text-text-tertiary py-2 max-h-32 leading-relaxed disabled:opacity-50"
                 style={{ height: 'auto', minHeight: '24px' }}
               />
+
+              {/* 右侧工具：连接器引用 + 执行权限 */}
+              <div className="flex items-center gap-1 shrink-0">
+                {/* 连接器（MCP）引用菜单 */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => { setShowConnectorMenu(v => !v); setShowAttachMenu(false); }}
+                    className={cn(
+                      'p-2 rounded-lg transition-colors',
+                      showConnectorMenu ? 'bg-accent/10 text-accent' : 'text-text-tertiary hover:text-accent hover:bg-bg-hover'
+                    )}
+                    title="引用连接器 / Agent / 工作流"
+                  >
+                    <Plug className="w-5 h-5" />
+                  </button>
+                  {showConnectorMenu && (
+                    <div className="absolute bottom-full right-0 mb-2 w-64 rounded-xl border border-border bg-bg-primary shadow-lg py-1 z-30 max-h-80 overflow-y-auto">
+                      <p className="px-3 pt-1.5 pb-1 text-xs font-semibold text-text-tertiary">连接器（MCP）</p>
+                      {mcps.length === 0 && <p className="px-3 py-1.5 text-xs text-text-tertiary">暂无已配置连接器</p>}
+                      {mcps.map((s) => (
+                        <button key={s.id} type="button" onClick={() => insertRef(`@mcp:${s.name}`)}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover transition-colors">
+                          <Plug className="w-3.5 h-3.5 shrink-0 text-accent" />
+                          <span className="truncate">{s.name}</span>
+                        </button>
+                      ))}
+                      <p className="px-3 pt-2 pb-1 text-xs font-semibold text-text-tertiary">Agent（专家）</p>
+                      {agents.length === 0 && <p className="px-3 py-1.5 text-xs text-text-tertiary">暂无 Agent</p>}
+                      {agents.slice(0, 12).map((a) => (
+                        <button key={a.id} type="button" onClick={() => insertRef(`@agent:${a.name}`)}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover transition-colors">
+                          <Bot className="w-3.5 h-3.5 shrink-0 text-accent" />
+                          <span className="truncate">{a.name}</span>
+                        </button>
+                      ))}
+                      <p className="px-3 pt-2 pb-1 text-xs font-semibold text-text-tertiary">工作流（技能）</p>
+                      {workflows.length === 0 && <p className="px-3 py-1.5 text-xs text-text-tertiary">暂无工作流</p>}
+                      {workflows.slice(0, 12).map((w) => (
+                        <button key={w.id} type="button" onClick={() => insertRef(`@workflow:${w.name}`)}
+                          className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-text-secondary hover:bg-bg-hover transition-colors">
+                          <Workflow className="w-3.5 h-3.5 shrink-0 text-accent" />
+                          <span className="truncate">{w.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 允许完全访问（执行权限） */}
+                <button
+                  type="button"
+                  onClick={() => setAllowFullAccess(v => !v)}
+                  className={cn(
+                    'p-2 rounded-lg transition-colors shrink-0',
+                    allowFullAccess
+                      ? 'bg-emerald-50 text-emerald-600'
+                      : 'text-text-tertiary hover:text-emerald-600 hover:bg-bg-hover'
+                  )}
+                  title={allowFullAccess ? '允许完全访问：自动执行，跳过操作确认' : '已启用操作确认：执行前需你批准'}
+                >
+                  <ShieldCheck className="w-5 h-5" />
+                </button>
+              </div>
+
               <button
                 onClick={handleSend}
                 disabled={!inputValue.trim() || isProcessing}
@@ -1911,9 +2062,12 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
             </div>
             <div className="flex items-center justify-between mt-2">
               <p className="text-xs text-text-tertiary">
-                {modeConfig.icon} {modeConfig.label} · {modeConfig.behavior === 'analyze_only' ? (activeMode === 'ask' ? '纯问答' : '仅规划') : modeConfig.behavior === 'execute_auto' ? '自动执行' : '需确认'}
+                {modeConfig.icon} {modeConfig.label} · {allowFullAccess
+                  ? '完全访问（自动执行）'
+                  : modeConfig.behavior === 'analyze_only' ? (activeMode === 'ask' ? '纯问答' : '仅规划') : modeConfig.behavior === 'execute_auto' ? '自动执行' : '执行需确认'}
               </p>
-              <p className="text-xs text-text-tertiary">
+              <p className="text-xs text-text-tertiary flex items-center gap-1">
+                {allowFullAccess && <ShieldCheck className="w-3 h-3 text-emerald-600" />}
                 `/help` 查看命令
               </p>
             </div>
@@ -1935,6 +2089,74 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
               </button>
             </div>
             <RouterDashboard />
+          </div>
+        </div>
+      )}
+
+      {/* ===== 引用对话中的文件 Overlay ===== */}
+      {showRefPicker && (
+        <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4">
+          <div className="bg-bg-primary border border-border rounded-2xl shadow-xl w-full max-w-md max-h-[80vh] overflow-y-auto p-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-lg font-semibold text-text-primary">引用对话中的文件</h2>
+              <button
+                onClick={() => setShowRefPicker(false)}
+                className="p-1.5 text-text-tertiary hover:text-text-primary hover:bg-bg-hover rounded-md transition-colors"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-xs text-text-tertiary mb-3">
+              勾选要加入当前对话上下文的历史附件，确认后会出现在输入框上方。
+            </p>
+            <div className="space-y-2">
+              {conversationAttachments.map((a) => {
+                const checked = refSelection.includes(a.id);
+                return (
+                  <label
+                    key={a.id}
+                    className={cn(
+                      'flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer transition-colors',
+                      checked ? 'border-accent bg-accent/5' : 'border-border hover:bg-bg-hover'
+                    )}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) =>
+                        setRefSelection((prev) =>
+                          e.target.checked ? [...prev, a.id] : prev.filter((id) => id !== a.id)
+                        )
+                      }
+                      className="accent-accent"
+                    />
+                    {a.kind === 'image' ? <ImageIcon className="w-4 h-4 shrink-0 text-accent" /> : <FileText className="w-4 h-4 shrink-0 text-accent" />}
+                    <span className="truncate text-sm text-text-secondary">{a.name}</span>
+                    <span className="ml-auto text-xs text-text-tertiary shrink-0">{(a.size / 1024).toFixed(0)}KB</span>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowRefPicker(false)}
+                className="px-4 py-2 text-sm rounded-lg border border-border text-text-secondary hover:bg-bg-hover transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmRefAttachments}
+                disabled={refSelection.length === 0}
+                className={cn(
+                  'px-4 py-2 text-sm rounded-lg transition-colors',
+                  refSelection.length > 0
+                    ? 'bg-accent hover:bg-accent-hover text-white'
+                    : 'bg-bg-tertiary text-text-tertiary cursor-not-allowed'
+                )}
+              >
+                确认引用（{refSelection.length}）
+              </button>
+            </div>
           </div>
         </div>
       )}
