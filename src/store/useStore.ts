@@ -2305,12 +2305,13 @@ export const useStore = create<AppState>()(
       },
       // 首次加载时：如果 localStorage 无数据，使用 mock 数据
       merge: (persistedState, currentState) => {
-        // 如果 persistedState 为空或没有 workflows，保留 mock 数据
         const persisted = persistedState as Partial<AppState> | null;
-        if (!persisted || !persisted.workflows || persisted.workflows.length === 0) {
+        // persistedState 是空对象（localStorage 无数据）时才使用 mock 初始值；
+        // 不能再用 workflows 做判断，否则只配了 channels / agents 的用户数据会被整体丢弃。
+        if (!persisted || Object.keys(persisted).length === 0) {
           return currentState;
         }
-        // 合并：persisted 覆盖 currentState 的业务数据
+        // 合并：persisted 覆盖 currentState 的业务数据，mock 数据作为默认值保留
         return { ...currentState, ...persisted };
       },
     },
