@@ -454,9 +454,41 @@ export async function getAvailableChannelFromStore(): Promise<{
 } | null> {
   const { useStore } = await import('../store/useStore');
   const store = useStore.getState();
-  const enabledChannels = store.channels.filter((c: any) => c.enabled && c.apiKey);
+  let channels = store.channels || [];
 
-  if (enabledChannels.length === 0) return null;
+  // 防御性 fallback：zustand persist 可能尚未 rehydrate，直接从 localStorage 读取
+  if (channels.length === 0 && typeof localStorage !== 'undefined') {
+    try {
+      const raw = localStorage.getItem('agentflow-data');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        const persistedChannels = parsed?.state?.channels || parsed?.channels;
+        if (Array.isArray(persistedChannels) && persistedChannels.length > 0) {
+          channels = persistedChannels;
+        }
+      }
+    } catch (e) {
+      console.warn('[getAvailableChannelFromStore] 读取 localStorage fallback 失败:', e);
+    }
+  }
+
+  const enabledChannels = channels.filter((c: any) => c.enabled && c.apiKey);
+
+  if (enabledChannels.length === 0) {
+    // 输出诊断日志，帮助用户/开发者定位是"未配置/被禁用/缺 Key"
+    if (channels.length === 0) {
+      console.warn('[getAvailableChannelFromStore] 没有配置任何 LLM 渠道');
+    } else {
+      const disabledCount = channels.filter((c: any) => !c.enabled).length;
+      const noKeyCount = channels.filter((c: any) => c.enabled && !c.apiKey).length;
+      console.warn(
+        `[getAvailableChannelFromStore] 没有可用渠道：共 ${channels.length} 个，` +
+          `禁用 ${disabledCount} 个，启用但缺 API Key ${noKeyCount} 个`,
+        channels.map((c: any) => ({ id: c.id, name: c.name, enabled: c.enabled, hasKey: !!c.apiKey })),
+      );
+    }
+    return null;
+  }
 
   const priority = ['openai', 'deepseek', 'anthropic', 'google', 'azure', 'custom'];
   for (const provider of priority) {
@@ -472,6 +504,7 @@ export async function getAvailableChannelFromStore(): Promise<{
     }
   }
 
+  // 兜底返回第一个可用渠道
   const channel = enabledChannels[0];
   return {
     channelId: channel.id,

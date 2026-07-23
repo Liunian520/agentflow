@@ -52,8 +52,15 @@ export async function metaAgentOrchestrate(
   const channelInfo = await getAvailableChannelFromStore();
 
   if (!channelInfo) {
-    // 无可用 LLM 渠道，降级为模板回复
-    return createFallbackPlan();
+    // 无可用 LLM 渠道，降级为模板回复；同时读取 store 给出更精确的诊断
+    const { useStore } = await import('../../../store/useStore');
+    const channels = useStore.getState().channels || [];
+    let reason: FallbackReason = 'none';
+    if (channels.length > 0) {
+      const anyEnabled = channels.some((c) => c.enabled);
+      reason = anyEnabled ? 'no_key' : 'disabled';
+    }
+    return createFallbackPlan(reason);
   }
 
   // 构建系统提示词（注入 Meta-Skill 三层策略 + Session Memory 固定前缀）
@@ -242,7 +249,16 @@ function normalizePlan(raw: any): OrchestrationPlan {
 }
 
 // ===== 无 LLM 渠道时的降级方案 =====
-function createFallbackPlan(): OrchestrationPlan {
+type FallbackReason = 'none' | 'disabled' | 'no_key';
+function createFallbackPlan(reason: FallbackReason = 'none'): OrchestrationPlan {
+  let reasoning: string;
+  if (reason === 'disabled') {
+    reasoning = `⚠️ 已检测到 LLM 渠道，但全部处于禁用状态，Meta-Agent 无法进行智能编排。\n\n请在「渠道设置」中找到对应渠道，打开「启用渠道」开关后再试。`;
+  } else if (reason === 'no_key') {
+    reasoning = `⚠️ 已检测到启用的 LLM 渠道，但缺少 API Key，Meta-Agent 无法进行智能编排。\n\n请在「渠道设置」中编辑该渠道，填写 API Key 并保存后再试。`;
+  } else {
+    reasoning = `⚠️ 当前未配置 LLM 渠道，Meta-Agent 无法进行智能编排。\n\n请在「渠道设置」中添加并启用一个渠道（填写 API Key、选择模型、打开启用开关）。\n\n目前你仍可使用关键词命令（如"创建Agent"、"查看列表"）进行基本操作。`;
+  }
   return {
     intent: 'general_chat',
     confidence: 0.3,
@@ -250,7 +266,7 @@ function createFallbackPlan(): OrchestrationPlan {
     agents: [],
     workflow: null,
     clarifications: [],
-    reasoning: `⚠️ 当前未配置 LLM 渠道，Meta-Agent 无法进行智能编排。\n\n请在「渠道设置」中添加 API Key 以启用 AI 驱动的智能编排功能。\n\n目前你仍可使用关键词命令（如"创建Agent"、"查看列表"）进行基本操作。`,
+    reasoning,
     source: 'meta_agent',
   };
 }
