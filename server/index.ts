@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { SSHService } from './services/sshService';
 import llmProxyRouter from './services/llmProxy';
 import { registerMcpRoutes } from './services/mcpService';
+import a2aRouter from './services/a2aService';
 
 dotenv.config();
 
@@ -48,6 +49,9 @@ app.use('/api/llm', llmProxyRouter);
 const mcpRouter = express.Router();
 registerMcpRoutes(mcpRouter);
 app.use('/api', mcpRouter);
+
+// Phase 11：A2A (Agent-to-Agent) 协议代理
+app.use('/api', a2aRouter);
 
 const sshService = new SSHService();
 

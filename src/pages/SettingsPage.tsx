@@ -1435,6 +1435,7 @@ export function SettingsPage() {
                   { label: 'MCP 工具集成', desc: 'Streamable HTTP / SSE / 本地文件系统，调用真实能力' },
                   { label: '对话式工作流创建', desc: '描述需求 → LLM 设计 → 编辑器细化' },
                   { label: 'Subagent 并行', desc: '多 Agent 并行执行 + aggregator 聚合结果' },
+                  { label: 'A2A 协议互操作', desc: 'Google A2A 协议，跨系统调用外部 Agent' },
                   { label: '渠道连接测试', desc: '实时验证 API Key + 延迟 + 模型可用性' },
                 ].map((item) => (
                   <div key={item.label} className="flex items-center gap-3 p-2.5 bg-bg-secondary rounded-md">

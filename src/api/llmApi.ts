@@ -108,21 +108,38 @@ export interface SSECallbacks {
 
 // ===== 后端健康检查 =====
 export async function checkBackendHealth(): Promise<{ ok: boolean; latency: number; message?: string }> {
-  const start = Date.now();
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const response = await fetch(`${API_BASE.replace(/\/api\/?$/, '')}/health`, {
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!response.ok) {
-      return { ok: false, latency: Date.now() - start, message: `后端返回 ${response.status}` };
+  const healthUrl = `${API_BASE.replace(/\/api\/?$/, '')}/health`;
+  const maxAttempts = 3;
+  const timeoutMs = 60000; // 60s — Render 冷启动可能需要 30-40s
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const start = Date.now();
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await fetch(healthUrl, {
+        signal: controller.signal,
+        headers: { 'Cache-Control': 'no-cache' },
+      });
+      clearTimeout(timer);
+      if (!response.ok) {
+        return { ok: false, latency: Date.now() - start, message: `后端返回 ${response.status}` };
+      }
+      return { ok: true, latency: Date.now() - start };
+    } catch (err: any) {
+      const isAbort = err.name === 'AbortError';
+      const isLast = attempt === maxAttempts - 1;
+      if (isLast) {
+        if (isAbort) {
+          return { ok: false, latency: Date.now() - start, message: `后端响应超时（${timeoutMs / 1000}s），Render 可能正在冷启动，请等待 30 秒后重试` };
+        }
+        return { ok: false, latency: Date.now() - start, message: err.message || '无法连接后端，请检查网络' };
+      }
+      // 非最后一次尝试，等待后重试
+      await new Promise((r) => setTimeout(r, 2000));
     }
-    return { ok: true, latency: Date.now() - start };
-  } catch (err: any) {
-    return { ok: false, latency: Date.now() - start, message: err.message || '无法连接后端' };
   }
+  return { ok: false, latency: 0, message: '多次尝试后仍无法连接后端' };
 }
 
 // ===== 非流式调用 =====
@@ -725,5 +742,172 @@ export async function callMcpTool(
     return data;
   } catch (error: any) {
     return { success: false, error: error.message };
+  }
+}
+
+// ===== A2A (Agent-to-Agent) 协议 API（Phase 11） =====
+
+export interface A2AAgentCard {
+  name: string;
+  description?: string;
+  version?: string;
+  url?: string;
+  capabilities?: { streaming?: boolean; pushNotifications?: boolean };
+  skills?: Array<{ id: string; name: string; description: string; tags?: string[] }>;
+}
+
+/** 发现 A2A Agent Card */
+export async function discoverA2AAgent(
+  agentUrl: string,
+  authHeaders?: Record<string, string>,
+): Promise<{ success: boolean; agentCard?: A2AAgentCard; message?: string }> {
+  try {
+    const data = await safeFetch<{ success: boolean; agentCard?: A2AAgentCard; message?: string }>(
+      `${API_BASE}/a2a/discover`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agentUrl, headers: authHeaders }),
+      },
+      30000,
+      1,
+    );
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}
+
+/** 非流式发送 A2A 任务 */
+export async function sendA2ATask(
+  agentUrl: string,
+  message: string,
+  options?: {
+    skillId?: string;
+    authHeaders?: Record<string, string>;
+    taskId?: string;
+  },
+): Promise<{ success: boolean; response?: string; state?: string; error?: string }> {
+  try {
+    const data = await safeFetch<{ success: boolean; response?: string; state?: string; message?: string }>(
+      `${API_BASE}/a2a/send`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          agentUrl,
+          message,
+          skillId: options?.skillId,
+          headers: options?.authHeaders,
+          taskId: options?.taskId,
+        }),
+      },
+      120000,
+      0,
+    );
+    if (!data.success) {
+      return { success: false, error: data.message || 'A2A 任务失败' };
+    }
+    return data;
+  } catch (err: any) {
+    return { success: false, error: err.message };
+  }
+}
+
+/** 流式发送 A2A 任务（SSE） */
+export interface A2AStreamCallbacks {
+  onStart?: (taskId: string) => void;
+  onDelta?: (data: { delta: string; fullText: string; state: string }) => void;
+  onDone?: (data: { response: string; state: string }) => void;
+  onError?: (message: string) => void;
+}
+
+export async function streamA2ATask(
+  agentUrl: string,
+  message: string,
+  callbacks: A2AStreamCallbacks,
+  options?: {
+    skillId?: string;
+    authHeaders?: Record<string, string>;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/a2a/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      agentUrl,
+      message,
+      skillId: options?.skillId,
+      headers: options?.authHeaders,
+    }),
+    signal: options?.signal,
+  });
+
+  if (!response.ok) {
+    callbacks.onError?.(`HTTP ${response.status}`);
+    return;
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) {
+    callbacks.onError?.('No response body');
+    return;
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let fullText = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      let currentEvent = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          currentEvent = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          const jsonStr = line.slice(5).trim();
+          if (!jsonStr) continue;
+          try {
+            const data = JSON.parse(jsonStr);
+            switch (currentEvent) {
+              case 'start':
+                callbacks.onStart?.(data.taskId);
+                break;
+              case 'delta':
+                if (data.fullText) fullText = data.fullText;
+                else if (data.delta) fullText += data.delta;
+                callbacks.onDelta?.({
+                  delta: data.delta || '',
+                  fullText,
+                  state: data.state || 'working',
+                });
+                break;
+              case 'done':
+                callbacks.onDone?.({
+                  response: data.response || fullText,
+                  state: data.state || 'completed',
+                });
+                return;
+              case 'error':
+                callbacks.onError?.(data.message || 'A2A 流式请求错误');
+                return;
+            }
+          } catch {
+            // 非 JSON，跳过
+          }
+        }
+      }
+    }
+  } catch (err: any) {
+    if (err.name === 'AbortError') return;
+    callbacks.onError?.(err.message);
   }
 }

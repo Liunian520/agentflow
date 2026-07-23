@@ -22,6 +22,7 @@ const NODE_TYPE_DESCRIPTION: Record<NodeType, { name: string; desc: string; icon
   llm:         { name: 'LLM 调用',   desc: '调用大语言模型（如GPT/Claude/DeepSeek）',     icon: 'Brain',     color: '#3b82f6', category: 'AI 能力' },
   agent:       { name: 'Agent',      desc: '智能 Agent 节点，自主执行任务',                icon: 'Bot',       color: '#8b5cf6', category: 'AI 能力' },
   subagent:    { name: '子 Agent',   desc: '并行子 Agent，多 Agent 协作',                  icon: 'Users',     color: '#a855f7', category: 'AI 能力' },
+  a2a:         { name: 'A2A 调用',   desc: '通过 A2A 协议调用外部 Agent（跨系统互操作）',  icon: 'Share2',    color: '#0891b2', category: 'AI 能力' },
   code:        { name: '代码执行',   desc: '执行 JavaScript/Python 代码处理数据',          icon: 'Code',      color: '#f59e0b', category: '数据处理' },
   template:    { name: '模板渲染',   desc: '用模板引擎渲染内容（如邮件模板）',             icon: 'FileText',  color: '#14b8a6', category: '数据处理' },
   variable:    { name: '变量设置',   desc: '设置和修改变量值',                              icon: 'Settings',  color: '#06b6d4', category: '数据处理' },

@@ -93,6 +93,12 @@ export const INITIAL_META_SKILL: MetaSkill = {
    - Example: "research + write + review in parallel" -> one subagent node with 3 sub-agents + aggregator
    - Only fall back to separate parallel agent nodes when sub-agents need distinct downstream wiring
 
+   When the task requires calling an EXTERNAL agent (another system's A2A Agent, cross-platform interop):
+   Use the **a2a** node: config = { "agentUrl": "https://...", "message": "process: {{input}}", "streaming": true, "outputVariable": "a2a_result" }
+   - Discovers the remote agent's capabilities via Agent Card
+   - Supports both streaming (sendSubscribe) and non-streaming (send) modes
+   - Message supports {{variable}} template substitution from upstream nodes
+
 5. Loop/iteration for repetitive processing:
    Pattern: Start -> Loop(iterate over items) -> End
    Use for batch processing, iterative refinement, or data collection

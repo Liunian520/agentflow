@@ -17,6 +17,7 @@ const nodeColorMap: Record<string, string> = {
   llm: '#8b5cf6',
   agent: '#3b82f6',
   subagent: '#a855f7',
+  a2a: '#0891b2',
   code: '#f59e0b',
   http: '#06b6d4',
   condition: '#f97316',
@@ -32,7 +33,7 @@ const nodeColorMap: Record<string, string> = {
 
 // 节点类型中文缩写
 const nodeTypeAbbr: Record<string, string> = {
-  start: '开始', end: '结束', llm: 'AI', agent: '助手', subagent: '子A',
+  start: '开始', end: '结束', llm: 'AI', agent: '助手', subagent: '子A', a2a: 'A2A',
   code: '代码', http: 'HTTP', condition: '分支', loop: '循环', variable: '变量',
   database: 'DB', host: '主机', knowledge: '知识', template: '模板',
   'human-in-loop': '人工', subworkflow: '子流',

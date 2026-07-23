@@ -14,7 +14,8 @@ export type NodeType =
   | 'template'
   | 'human-in-loop'
   | 'subworkflow'
-  | 'subagent';
+  | 'subagent'
+  | 'a2a';
 
 export type VariableType = 'string' | 'number' | 'boolean' | 'object' | 'array' | 'file';
 
@@ -131,6 +132,36 @@ export interface SubAgentConfig {
   aggregatorPrompt?: string;  // 聚合提示（将各子 Agent 输出汇总为最终结论）
   outputVariable: string;
   parallel: boolean;          // 是否并行执行（默认 true）
+}
+
+// ===== A2A 协议节点配置（Phase 11：Agent-to-Agent 互操作） =====
+export interface A2AAgentCardInfo {
+  name: string;
+  description?: string;
+  version?: string;
+  url?: string;
+  capabilities?: {
+    streaming?: boolean;
+    pushNotifications?: boolean;
+  };
+  skills?: Array<{
+    id: string;
+    name: string;
+    description: string;
+    tags?: string[];
+  }>;
+}
+
+export interface A2AConfig {
+  agentUrl: string;           // 外部 A2A Agent 的 base URL
+  message: string;            // 发送给外部 Agent 的消息（支持 {{变量}} 模板）
+  skillId?: string;           // 可选：指定调用的 skill
+  streaming: boolean;         // 是否使用流式模式（sendSubscribe）
+  authHeaders?: Record<string, string>; // 可选认证头
+  outputVariable: string;     // 输出变量名
+  timeout: number;            // 超时（毫秒）
+  // 发现的 Agent Card 缓存（用户点"发现"后自动填充）
+  discoveredCard?: A2AAgentCardInfo;
 }
 
 export interface LLMConfig {
@@ -279,6 +310,7 @@ export interface NodeData {
   humanConfig?: HumanInLoopConfig;
   subworkflowConfig?: SubworkflowConfig;
   subagentConfig?: SubAgentConfig;
+  a2aConfig?: A2AConfig;
   templateConfig?: TemplateConfig;
 
   tools?: ToolConfig[];

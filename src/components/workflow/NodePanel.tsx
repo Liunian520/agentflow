@@ -23,6 +23,7 @@ import {
   Sparkles,
   Target,
   Workflow,
+  Share2,
 } from 'lucide-react';
 import { useStore } from '../../store/useStore';
 import { cn } from '../../lib/utils';
@@ -248,6 +249,28 @@ const nodeTemplates: NodeTemplate[] = [
         aggregatorPrompt: '你是总编辑，请将以下多位子 Agent 的输出整合为一份连贯、结构清晰的最终交付物。',
         outputVariable: 'subagent_result',
         parallel: true,
+      },
+    },
+  },
+  {
+    id: 'a2a',
+    type: 'a2a',
+    name: 'A2A 远程 Agent',
+    description: '通过 Google A2A 协议调用外部 Agent，实现跨系统 Agent 互操作',
+    icon: Share2,
+    color: '#0891b2',
+    category: 'AI 能力',
+    defaultData: {
+      label: 'A2A 远程 Agent',
+      description: '通过 A2A 协议调用外部 Agent',
+      iconName: 'Share2',
+      type: 'a2a',
+      a2aConfig: {
+        agentUrl: '',
+        message: '请帮我处理以下任务：{{input}}',
+        streaming: true,
+        outputVariable: 'a2a_result',
+        timeout: 120000,
       },
     },
   },

@@ -68,8 +68,9 @@ Current system context:
 - Number of agents: ${store.agents.length}
 - Number of workflows: ${store.workflows.length}
 - Available models: ${channelInfo.models.map(m => m.displayName).join(', ')}
-- Available node types: start, end, llm, agent, code, http, condition, loop, variable, database, host, knowledge, template, human-in-loop, subworkflow, subagent
+- Available node types: start, end, llm, agent, code, http, condition, loop, variable, database, host, knowledge, template, human-in-loop, subworkflow, subagent, a2a
 - 当任务需要多个角色协作且可并行时，优先使用 subagent 节点（并行 Agent 团队），其 config 形如：{ "agents": [{"id":"sub-1","name":"研究员","model":"GPT-4o","systemPrompt":"...","tools":[]}], "aggregatorPrompt":"整合为最终交付物", "outputVariable":"subagent_result", "parallel": true }
+- 当任务需要调用外部 Agent（其他系统提供的 A2A Agent，跨平台互操作）时，使用 a2a 节点，其 config 形如：{ "agentUrl":"https://external-agent.example.com", "message":"请分析以下内容：{{input}}", "streaming":true, "outputVariable":"a2a_result" }
 
 User request: ${userInput}${options.experienceContext ? '\n' + options.experienceContext : ''}${options.recalledMemoryContext ? '\n' + options.recalledMemoryContext : ''}${options.sessionMemoryContext ? '\n' + options.sessionMemoryContext : ''}`;
 

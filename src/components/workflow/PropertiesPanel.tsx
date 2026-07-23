@@ -1,10 +1,12 @@
 import { useState } from 'react';
-import { X, Trash2, Copy, Play, Plus, Settings, Bot, Trash } from 'lucide-react';
+import { X, Trash2, Copy, Play, Plus, Settings, Bot, Trash, Loader2, Search } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import * as Icons from 'lucide-react';
 import type { Node } from 'reactflow';
 import type { NodeType, SubAgentDef } from '../../types';
 import { useStore } from '../../store/useStore';
+import { discoverA2AAgent } from '../../api/llmApi';
+import type { A2AAgentCard } from '../../api/llmApi';
 
 interface PropertiesPanelProps {
   selectedNode: Node | null;
@@ -38,6 +40,8 @@ const iconMap: Record<string, React.ComponentType<{ className?: string; style?: 
   User: Icons.User,
   BookOpen: Icons.BookOpen,
   Layers: Icons.Layers,
+  Share2: Icons.Share2,
+  Network: Icons.Network,
 };
 
 const typeColors: Record<string, string> = {
@@ -55,6 +59,7 @@ const typeColors: Record<string, string> = {
   loop: 'bg-pink-500',
   subworkflow: 'bg-indigo-500',
   subagent: 'bg-violet-600',
+  a2a: 'bg-cyan-600',
   'human-in-loop': 'bg-rose-500',
   host: 'bg-gray-600',
 };
@@ -120,6 +125,32 @@ export function PropertiesPanel({
 }: PropertiesPanelProps) {
   const [activeTab, setActiveTab] = useState<'basic' | 'config'>('basic');
 
+  // A2A Agent Card 发现状态
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
+  const [discoveredCard, setDiscoveredCard] = useState<A2AAgentCard | null>(null);
+
+  const handleDiscoverAgent = async () => {
+    const config = selectedNode?.data?.a2aConfig;
+    if (!config?.agentUrl) return;
+    setDiscovering(true);
+    setDiscoverError(null);
+    const result = await discoverA2AAgent(config.agentUrl, config.authHeaders);
+    setDiscovering(false);
+    if (result.success && result.agentCard) {
+      setDiscoveredCard(result.agentCard);
+      // 将发现的 card 存入节点配置
+      if (selectedNode && workflowId) {
+        updateWorkflowNode(workflowId, selectedNode.id, {
+          ...selectedNode.data,
+          a2aConfig: { ...config, discoveredCard: result.agentCard },
+        });
+      }
+    } else {
+      setDiscoverError(result.message || '发现失败');
+    }
+  };
+
   const { updateWorkflowNode, workflows, hosts, channels, mcps } = useStore();
 
   const workflow = workflows.find((w) => w.id === workflowId);
@@ -178,7 +209,7 @@ export function PropertiesPanel({
     selectedNode.data[configKey] = updatedConfig;
   };
 
-  const showConfigTab = ['llm', 'agent', 'code', 'http', 'host', 'condition', 'loop', 'variable', 'database', 'knowledge', 'template', 'subworkflow', 'subagent', 'human-in-loop', 'start', 'end'].includes(nodeType);
+  const showConfigTab = ['llm', 'agent', 'code', 'http', 'host', 'condition', 'loop', 'variable', 'database', 'knowledge', 'template', 'subworkflow', 'subagent', 'a2a', 'human-in-loop', 'start', 'end'].includes(nodeType);
 
   const renderConfigContent = () => {
     switch (nodeType) {
@@ -737,6 +768,195 @@ export function PropertiesPanel({
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+        );
+      }
+
+      case 'a2a': {
+        const config = selectedNode.data.a2aConfig || {
+          agentUrl: '',
+          message: '',
+          streaming: true,
+          outputVariable: 'a2a_result',
+          timeout: 120000,
+        };
+        const card = discoveredCard || config.discoveredCard;
+        return (
+          <div className="p-4 space-y-4">
+            {/* Agent URL */}
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">Agent URL</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={config.agentUrl || ''}
+                  onChange={(e) => {
+                    if (selectedNode && workflowId) {
+                      updateWorkflowNode(workflowId, selectedNode.id, {
+                        ...selectedNode.data,
+                        a2aConfig: { ...config, agentUrl: e.target.value },
+                      });
+                    }
+                  }}
+                  placeholder="https://external-agent.example.com"
+                  className="flex-1 px-3 py-2 text-sm border border-border rounded-md bg-bg-primary text-text-primary focus:outline-none focus:ring-2 focus:ring-cyan-500"
+                />
+                <button
+                  type="button"
+                  onClick={handleDiscoverAgent}
+                  disabled={discovering || !config.agentUrl}
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-white bg-cyan-600 hover:bg-cyan-700 rounded-md transition-colors disabled:opacity-50"
+                >
+                  {discovering ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Search className="w-3.5 h-3.5" />}
+                  发现
+                </button>
+              </div>
+              {discoverError && (
+                <p className="mt-1.5 text-xs text-red-500">{discoverError}</p>
+              )}
+            </div>
+
+            {/* Agent Card 信息 */}
+            {card && (
+              <div className="p-3 bg-cyan-50 dark:bg-cyan-950/30 border border-cyan-200 dark:border-cyan-800 rounded-md space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-medium text-cyan-700 dark:text-cyan-300">{card.name}</span>
+                  {card.version && <span className="text-xs text-text-tertiary">v{card.version}</span>}
+                </div>
+                {card.description && <p className="text-xs text-text-secondary">{card.description}</p>}
+                {card.capabilities && (
+                  <div className="flex gap-2 flex-wrap">
+                    {card.capabilities.streaming && <span className="text-xs px-1.5 py-0.5 bg-cyan-100 dark:bg-cyan-900 text-cyan-700 dark:text-cyan-300 rounded">流式</span>}
+                    {card.capabilities.pushNotifications && <span className="text-xs px-1.5 py-0.5 bg-cyan-100 dark:bg-cyan-900 text-cyan-700 dark:text-cyan-300 rounded">推送</span>}
+                  </div>
+                )}
+                {card.skills && card.skills.length > 0 && (
+                  <div className="space-y-1">
+                    <span className="text-xs font-medium text-text-tertiary">Skills ({card.skills.length})</span>
+                    {card.skills.map((skill: { id: string; name: string; description: string; tags?: string[] }) => (
+                      <button
+                        key={skill.id}
+                        type="button"
+                        onClick={() => {
+                          if (selectedNode && workflowId) {
+                            updateWorkflowNode(workflowId, selectedNode.id, {
+                              ...selectedNode.data,
+                              a2aConfig: { ...config, skillId: skill.id },
+                            });
+                          }
+                        }}
+                        className={cn(
+                          'block w-full text-left p-2 rounded-md text-xs transition-colors',
+                          config.skillId === skill.id
+                            ? 'bg-cyan-100 dark:bg-cyan-900 text-cyan-700 dark:text-cyan-300'
+                            : 'hover:bg-bg-hover'
+                        )}
+                      >
+                        <span className="font-medium">{skill.name}</span>
+                        <span className="block text-text-tertiary mt-0.5">{skill.description}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* 消息模板 */}
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">
+                消息内容
+                <span className="ml-2 text-xs text-text-tertiary font-normal">支持 {`{{变量名}}`} 模板替换</span>
+              </label>
+              <textarea
+                value={config.message || ''}
+                onChange={(e) => {
+                  if (selectedNode && workflowId) {
+                    updateWorkflowNode(workflowId, selectedNode.id, {
+                      ...selectedNode.data,
+                      a2aConfig: { ...config, message: e.target.value },
+                    });
+                  }
+                }}
+                placeholder={'请分析以下内容：{{input}}'}
+                rows={4}
+                className="w-full px-3 py-2 text-sm border border-border rounded-md bg-bg-primary text-text-primary focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              />
+            </div>
+
+            {/* 流式模式 */}
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-sm font-medium text-text-primary">流式模式</span>
+                <p className="text-xs text-text-tertiary">使用 sendSubscribe 实时接收响应</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedNode && workflowId) {
+                    updateWorkflowNode(workflowId, selectedNode.id, {
+                      ...selectedNode.data,
+                      a2aConfig: { ...config, streaming: !config.streaming },
+                    });
+                  }
+                }}
+                className={cn(
+                  'relative inline-flex h-6 w-11 items-center rounded-full transition-colors',
+                  config.streaming ? 'bg-cyan-600' : 'bg-gray-300'
+                )}
+              >
+                <span className={cn(
+                  'inline-block h-4 w-4 transform rounded-full bg-white transition-transform',
+                  config.streaming ? 'translate-x-6' : 'translate-x-1'
+                )} />
+              </button>
+            </div>
+
+            {/* 输出变量 */}
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">输出变量名</label>
+              <input
+                type="text"
+                value={config.outputVariable || ''}
+                onChange={(e) => {
+                  if (selectedNode && workflowId) {
+                    updateWorkflowNode(workflowId, selectedNode.id, {
+                      ...selectedNode.data,
+                      a2aConfig: { ...config, outputVariable: e.target.value },
+                    });
+                  }
+                }}
+                placeholder="a2a_result"
+                className="w-full px-3 py-2 text-sm border border-border rounded-md bg-bg-primary text-text-primary focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              />
+            </div>
+
+            {/* 认证头 */}
+            <div>
+              <label className="block text-sm font-medium text-text-primary mb-2">
+                认证头
+                <span className="ml-2 text-xs text-text-tertiary font-normal">可选（如 Authorization: Bearer xxx）</span>
+              </label>
+              <textarea
+                value={config.authHeaders ? JSON.stringify(config.authHeaders, null, 2) : ''}
+                onChange={(e) => {
+                  let headers: Record<string, string> | undefined;
+                  try {
+                    headers = e.target.value.trim() ? JSON.parse(e.target.value) : undefined;
+                  } catch {
+                    // JSON 解析失败时不更新
+                  }
+                  if (selectedNode && workflowId && headers !== undefined) {
+                    updateWorkflowNode(workflowId, selectedNode.id, {
+                      ...selectedNode.data,
+                      a2aConfig: { ...config, authHeaders: headers },
+                    });
+                  }
+                }}
+                placeholder={'{"Authorization": "Bearer token123"}'}
+                rows={2}
+                className="w-full px-3 py-2 text-xs font-mono border border-border rounded-md bg-bg-primary text-text-primary focus:outline-none focus:ring-2 focus:ring-cyan-500"
+              />
             </div>
           </div>
         );

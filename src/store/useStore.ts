@@ -5,7 +5,7 @@ import { mockWorkflows, mockAgents, mockPlugins, mockTemplates, mockMessages, no
 import { generateId } from '../lib/utils';
 import { sshApi } from '../api/sshApi';
 import { hashPassword, verifyPassword } from '../lib/passwordUtils';
-import { getChannelForModel, getAvailableChannelFromStore, routedChatLLM } from '../api/llmApi';
+import { getChannelForModel, getAvailableChannelFromStore, routedChatLLM, sendA2ATask, streamA2ATask } from '../api/llmApi';
 import { INITIAL_META_SKILL } from '../lib/metaSkill';
 import { extractTaskFeatures } from '../lib/modelRouter';
 
@@ -939,6 +939,123 @@ export const useStore = create<AppState>()(
           level: 'success',
           message: `SubAgent 编排完成：${subAgents.length} 个子 Agent，${completedCount} 个成功`,
         });
+        break;
+      }
+
+      // ===== A2A 协议节点（Phase 11：Agent-to-Agent 互操作） =====
+      case 'a2a': {
+        const config = currentNode.defaultData?.a2aConfig;
+        if (!config?.agentUrl) {
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: 'A2A 节点未配置 agentUrl',
+          });
+          newVariables[config?.outputVariable || 'a2a_result'] = { error: '未配置 Agent URL' };
+          break;
+        }
+
+        // 模板替换：将 {{变量名}} 替换为实际变量值
+        let messageText = config.message || '';
+        const varRegex = /\{\{(\w+)\}\}/g;
+        let match;
+        while ((match = varRegex.exec(messageText)) !== null) {
+          const varName = match[1];
+          const varValue = newVariables[varName];
+          const replacement = varValue != null
+            ? (typeof varValue === 'string' ? varValue : JSON.stringify(varValue))
+            : '';
+          messageText = messageText.replace(match[0], replacement);
+        }
+
+        newLogs.push({
+          id: `log-${generateId()}`,
+          nodeId: currentNode.id,
+          nodeName: currentNode.name,
+          timestamp: new Date().toISOString(),
+          level: 'info',
+          message: `A2A 调用：${config.agentUrl}${config.streaming ? '（流式）' : ''}${config.skillId ? ` skill=${config.skillId}` : ''}`,
+        });
+
+        try {
+          if (config.streaming) {
+            // 流式模式
+            let fullText = '';
+            let finalState = 'completed';
+            await streamA2ATask(
+              config.agentUrl,
+              messageText,
+              {
+                onDelta: (data) => {
+                  fullText = data.fullText;
+                  finalState = data.state;
+                },
+                onDone: (data) => {
+                  fullText = data.response;
+                  finalState = data.state;
+                },
+                onError: (msg) => {
+                  finalState = 'failed';
+                  fullText = fullText || `A2A 流式错误: ${msg}`;
+                },
+              },
+              {
+                skillId: config.skillId,
+                authHeaders: config.authHeaders,
+              },
+            );
+            newVariables[config.outputVariable || 'a2a_result'] = {
+              response: fullText,
+              state: finalState,
+              agentUrl: config.agentUrl,
+            };
+          } else {
+            // 非流式模式
+            const result = await sendA2ATask(
+              config.agentUrl,
+              messageText,
+              {
+                skillId: config.skillId,
+                authHeaders: config.authHeaders,
+              },
+            );
+            if (result.success) {
+              newVariables[config.outputVariable || 'a2a_result'] = {
+                response: result.response || '',
+                state: result.state || 'completed',
+                agentUrl: config.agentUrl,
+              };
+            } else {
+              throw new Error(result.error || 'A2A 任务失败');
+            }
+          }
+
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'success',
+            message: `A2A 调用完成`,
+          });
+        } catch (err: any) {
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `A2A 调用失败: ${err.message}`,
+          });
+          newVariables[config.outputVariable || 'a2a_result'] = {
+            error: err.message,
+            state: 'failed',
+            agentUrl: config.agentUrl,
+          };
+        }
         break;
       }
 
