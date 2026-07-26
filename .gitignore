@@ -23,3 +23,27 @@ dist-server
 *.njsproj
 *.sln
 *.sw?
+
+/src/generated/prisma
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Database
+*.db
+*.db-journal
+
+# Wrangler local state
+.wrangler/
+worker-configuration.d.ts
+
+# IDE configs
+.trae/
+.agents/
+.claude/
+.windsurf/
+
+# Skills lock
+skills-lock.json

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 斜杠命令系统 — 对标 Claude Code 的 /review-pr /deploy-staging
  * 输入 / 时弹出命令列表，快速触发操作
  */

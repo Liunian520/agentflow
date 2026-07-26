@@ -1,4 +1,4 @@
-export type NodeType =
+﻿export type NodeType =
   | 'start'
   | 'end'
   | 'llm'
@@ -12,12 +12,17 @@ export type NodeType =
   | 'host'
   | 'knowledge'
   | 'template'
-  | 'human-in-loop'
+  | 'tool'
+  | 'memory_read'
+  | 'memory_write'
+  | 'human_in_loop'
   | 'subworkflow'
   | 'subagent'
   | 'a2a';
 
 export type VariableType = 'string' | 'number' | 'boolean' | 'object' | 'array' | 'file';
+
+export type VariableSource = 'input' | 'node_output' | 'constant' | 'template';
 
 export interface Variable {
   id: string;
@@ -25,6 +30,8 @@ export interface Variable {
   type: VariableType;
   value: any;
   description?: string;
+  source?: VariableSource;
+  defaultValue?: any;
 }
 
 export interface User {
@@ -40,6 +47,7 @@ export interface ModelConfig {
   id: string;
   name: string;
   displayName: string;
+  supportsVision?: boolean;
 }
 
 export interface Channel {
@@ -113,6 +121,10 @@ export interface AgentConfig {
   maxTokens?: number;
   tools: string[];
   toolConfig?: Record<string, any>;
+  outputVariable?: string;
+  maxIterations?: number;
+  enableMemory?: boolean;
+  memoryNamespace?: string;
 }
 
 // ===== SubAgent 并行节点配置（Phase 5：多 Agent 并行编排） =====
@@ -121,17 +133,30 @@ export interface SubAgentDef {
   name: string;
   model: string;
   systemPrompt: string;
+  description?: string;
   inputVariable?: string;   // 读取哪个变量作为输入；不填则使用全部变量上下文
   temperature?: number;
   maxTokens?: number;
+  maxIterations?: number;
   tools?: string[];         // 引用的 MCP 工具标识（如 "web-search"）
+  specialties?: string[];   // 专长领域，用于路由匹配
+  capabilities?: string[];  // 能力标签
+  keywords?: string[];      // 关键词，用于关键词路由匹配
+  enableMemory?: boolean;
+  memoryNamespace?: string;
+  priority?: number;        // 优先级权重
 }
 
 export interface SubAgentConfig {
   agents: SubAgentDef[];
   aggregatorPrompt?: string;  // 聚合提示（将各子 Agent 输出汇总为最终结论）
   outputVariable: string;
-  parallel: boolean;          // 是否并行执行（默认 true）
+  parallel?: boolean;          // 是否并行执行（默认 true）；保留向后兼容，新代码使用 mode
+  mode?: 'single' | 'router' | 'parallel';  // 执行模式
+  routerStrategy?: 'intent' | 'keyword' | 'roundRobin';  // router 模式下的路由策略
+  aggregationMethod?: 'first' | 'all' | 'best' | 'vote';  // parallel 模式下的结果聚合方式
+  inputVariable?: string;     // 输入变量（支持 {{变量}} 模板）
+  autoGenerate?: boolean;     // 开启后，执行前根据输入任务自动生成子 Agent 列表
 }
 
 // ===== A2A 协议节点配置（Phase 11：Agent-to-Agent 互操作） =====
@@ -262,6 +287,24 @@ export interface SubworkflowConfig {
   outputVariable: string;
 }
 
+export interface ToolConfig {
+  toolSource: 'mcp' | 'local' | 'http';
+  mcpServerId?: string;
+  toolName: string;
+  inputMapping?: Record<string, string>;
+  outputMapping?: Record<string, string>;
+  outputVariable: string;
+  timeout: number;
+  retryPolicy?: {
+    maxRetries: number;
+    backoff: 'linear' | 'exponential';
+    backoffMs?: number;
+  };
+  httpUrl?: string;
+  httpMethod?: string;
+  httpHeaders?: Record<string, string>;
+}
+
 export interface TemplateConfig {
   template: string;
   templateType: 'string' | 'json';
@@ -301,6 +344,7 @@ export interface NodeData {
   agentConfig?: AgentConfig;
   codeConfig?: CodeConfig;
   httpConfig?: HttpConfig;
+  toolConfig?: ToolConfig;
   conditionConfig?: ConditionConfig;
   loopConfig?: LoopConfig;
   variableConfig?: VariableConfig;
@@ -343,6 +387,44 @@ export interface WorkflowEdge {
   label?: string;
   sourceHandle?: string;
   targetHandle?: string;
+}
+
+export type NodeConfig = Record<string, any>;
+
+export type NodeExecutionStatus = 'idle' | 'running' | 'completed' | 'failed' | 'skipped';
+
+export interface FlowNodePosition {
+  x: number;
+  y: number;
+}
+
+export interface FlowNodeData extends NodeData {
+  label: string;
+  [key: string]: any;
+}
+
+export interface FlowNode {
+  id: string;
+  type: string;
+  position: FlowNodePosition;
+  data: FlowNodeData;
+  width?: number;
+  height?: number;
+  selected?: boolean;
+  dragging?: boolean;
+}
+
+export interface FlowEdge {
+  id: string;
+  source: string;
+  target: string;
+  sourceHandle?: string | null;
+  targetHandle?: string | null;
+  animated?: boolean;
+  label?: string;
+  style?: Record<string, any>;
+  data?: Record<string, any>;
+  selected?: boolean;
 }
 
 export interface ExecutionLog {
@@ -440,6 +522,59 @@ export interface Plugin {
   version: string;
   installed: boolean;
   tags: string[];
+}
+
+// ===== 插件系统类型 =====
+
+/** 插件分类 */
+export type PluginCategory =
+  | 'context-compression'
+  | 'search'
+  | 'database'
+  | 'dev-tools'
+  | 'ai-models'
+  | 'file-system'
+  | 'communication'
+  | 'monitoring'
+  | 'other';
+
+/** 插件清单 — 描述一个插件的静态元数据 */
+export interface PluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  type: 'mcp-server' | 'skill';
+  transport: 'stdio' | 'sse' | 'streamable-http';
+  installSource: 'npm' | 'github' | 'builtin';
+  packageName?: string;
+  gitUrl?: string;
+  configSchema?: Record<string, any>;
+  icon?: string;
+  category: PluginCategory;
+  tags: string[];
+  verified: boolean;
+  builtin: boolean;
+}
+
+/** 插件安装状态 */
+export interface PluginInstallation {
+  id: string;
+  status: 'available' | 'installing' | 'installed' | 'error' | 'uninstalling';
+  installedVersion?: string;
+  installedPath?: string;
+  config?: Record<string, any>;
+  enabled: boolean;
+  error?: string;
+  installedAt?: string;
+}
+
+/** 插件注册表条目 — 清单 + 社区指标 */
+export interface PluginRegistryEntry {
+  manifest: PluginManifest;
+  popularity: number;
+  rating: number;
 }
 
 export interface Template {
@@ -820,4 +955,164 @@ export interface MemoryAuditEntry {
   before?: string;
   after?: string;
   source: 'auto' | 'user' | 'dream' | 'extraction' | 'reflection' | 'self_edit';
+}
+
+// ===== Agent Runtime System =====
+
+export type AgentStatus = 'idle' | 'busy' | 'queued' | 'error' | 'offline';
+
+export interface AgentRuntimeState {
+  agentId: string;
+  status: AgentStatus;
+  currentTaskId: string | null;
+  lastActiveAt: number;
+  totalTasks: number;
+  successRate: number;
+  avgLatencyMs: number;
+  capabilities: string[];
+  maxConcurrent: number;
+  activeConcurrent: number;
+}
+
+export interface AgentMessage {
+  id: string;
+  fromAgentId: string;
+  toAgentId: string | null; // null = broadcast
+  type: 'request' | 'response' | 'notify' | 'broadcast';
+  content: string;
+  metadata: Record<string, any>;
+  timestamp: number;
+  replyTo: string | null;
+}
+
+export interface ScheduledTask {
+  id: string;
+  input: string;
+  requiredCapabilities: string[];
+  preferredModel: string | null;
+  priority: 'low' | 'normal' | 'high';
+  status: 'queued' | 'assigned' | 'running' | 'done' | 'failed';
+  assignedAgentId: string | null;
+  result: string | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+}
+
+export interface RouterEvolutionRecord {
+  timestamp: number;
+  oldWeights: { stat: number; knn: number; cost: number };
+  newWeights: { stat: number; knn: number; cost: number };
+  accuracyBefore: number;
+  accuracyAfter: number;
+  sampleSize: number;
+  trigger: 'scheduled' | 'accuracy_drop' | 'manual';
+}
+
+// ===== 工作流执行引擎类型（Task 5） =====
+
+export type WorkflowEngineStatus = 'idle' | 'running' | 'paused' | 'completed' | 'failed';
+
+export type WorkflowEngineEventName =
+  | 'node:start'
+  | 'node:complete'
+  | 'node:error'
+  | 'workflow:start'
+  | 'workflow:complete'
+  | 'workflow:error'
+  | 'workflow:paused'
+  | 'workflow:resumed';
+
+export interface NodeExecutionResult {
+  nodeId: string;
+  nodeName: string;
+  nodeType: NodeType;
+  success: boolean;
+  output?: Record<string, any>;
+  error?: string;
+  startTime: number;
+  endTime: number;
+  duration: number;
+  metadata?: Record<string, any>;
+}
+
+export interface ExecutionStep {
+  stepIndex: number;
+  nodeId: string;
+  result: NodeExecutionResult;
+}
+
+export interface ExecutionPlan {
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  sortedNodeIds: string[];
+  startNodeId: string | null;
+  endNodeIds: string[];
+  adjacencyList: Record<string, string[]>;
+  reverseAdjacencyList: Record<string, string[]>;
+  hasCycle: boolean;
+  cyclePath?: string[];
+}
+
+export interface WorkflowEngineState {
+  status: WorkflowEngineStatus;
+  currentNodeId: string | null;
+  completedNodeIds: string[];
+  failedNodeIds: string[];
+  variables: Record<string, any>;
+  nodeOutputs: Record<string, Record<string, any>>;
+  steps: ExecutionStep[];
+  currentStepIndex: number;
+  error?: string;
+  startTime: number | null;
+  endTime: number | null;
+  totalDuration: number | null;
+}
+
+export interface WorkflowEngineOptions {
+  maxIterations?: number;
+  enableStepMode?: boolean;
+  llmExecutor?: LLMExecutorFunction;
+  httpExecutor?: HttpExecutorFunction;
+  mcpToolExecutor?: MCPToolExecutorFunction;
+}
+
+export type LLMExecutorFunction = (config: {
+  model?: string;
+  systemPrompt?: string;
+  userPrompt: string;
+  temperature?: number;
+  maxTokens?: number;
+  variables: Record<string, any>;
+}) => Promise<string>;
+
+export type HttpExecutorFunction = (config: {
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string;
+  timeout?: number;
+}) => Promise<{ status: number; data: any; headers: Record<string, string> }>;
+
+export type MCPToolExecutorFunction = (config: {
+  serverId?: string;
+  toolName: string;
+  arguments?: Record<string, any>;
+}) => Promise<any>;
+
+export type EventCallback = (data: any) => void | Promise<void>;
+
+// ===== Agent 模板系统 =====
+
+export interface AgentTemplate {
+  id: string;
+  name: string;
+  description: string;
+  avatar: string;
+  category: 'writing' | 'coding' | 'research' | 'general';
+  systemPrompt: string;
+  tools: string[];
+  temperature: number;
+  maxTokens: number;
+  suggestedModel?: string;
 }

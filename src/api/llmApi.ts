@@ -1,4 +1,4 @@
-/**
+﻿/**
  * LLM API 客户端 — 统一的前端 LLM 调用层
  * 通过后端 SSE 代理调用，避免前端暴露 API Key
  */
@@ -6,7 +6,7 @@
 import type { TaskFeatures, RoutingDecision } from '../types';
 import {
   getRoutingPool, selectModel, buildRouterRecord, recordRouterFeedback,
-  estimateTokens, maybeCompactRouterMemory,
+  estimateTokens, maybeCompactRouterMemory, getRouterMemorySnapshot,
 } from '../lib/modelRouter';
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001/api';
@@ -72,6 +72,12 @@ async function safeFetch<T>(
 }
 
 // ===== 类型定义 =====
+
+/** 多模态消息内容片段（OpenAI 兼容格式） */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+
 export interface LLMChatOptions {
   channelId: string;
   provider: 'openai' | 'anthropic' | 'google' | 'deepseek' | 'azure' | 'custom';
@@ -80,13 +86,15 @@ export interface LLMChatOptions {
   model: string;
   messages: Array<{
     role: 'system' | 'user' | 'assistant' | 'tool';
-    content: string;
+    content: string | ContentPart[];
     name?: string;
   }>;
   temperature?: number;
   maxTokens?: number;
   stream?: boolean;
   tools?: any[]; // Phase 6：MCP 工具 / function calling schema
+  sessionId?: string; // Phase 1：会话持久化，服务端据此落盘消息
+  taskId?: string;   // Phase 1：后台任务 ID，服务端据此标记状态供前端轮询
 }
 
 export interface LLMChatResult {
@@ -101,9 +109,10 @@ export interface LLMChatResult {
 export interface SSECallbacks {
   onStart?: (data: { model: string; provider: string }) => void;
   onDelta?: (data: { content: string; fullContent: string }) => void;
-  onDone?: (data: { content: string }) => void;
+  onReasoning?: (data: { content: string; fullContent: string }) => void;
+  onDone?: (data: { content: string; reasoningContent?: string }) => void;
   onError?: (data: { message: string; status?: number }) => void;
-  onTool?: (data: { name: string; status: 'running' | 'done'; result?: string }) => void;
+  onTool?: (data: { name: string; status: 'running' | 'done'; result?: string; args?: any }) => void;
 }
 
 // ===== 后端健康检查 =====
@@ -213,6 +222,8 @@ export async function chatLLM(options: LLMChatOptions): Promise<LLMChatResult> {
         temperature: options.temperature,
         maxTokens: options.maxTokens,
         tools: options.tools,
+        sessionId: options.sessionId,
+        taskId: options.taskId,
       }),
     },
     120000,
@@ -237,6 +248,8 @@ export function chatLLMStream(options: LLMChatOptions, callbacks: SSECallbacks):
       temperature: options.temperature,
       maxTokens: options.maxTokens,
       tools: options.tools,
+      sessionId: options.sessionId,
+      taskId: options.taskId,
     }),
     signal: controller.signal,
   })
@@ -350,6 +363,8 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
       temperature: options.temperature,
       maxTokens: options.maxTokens,
       tools: options.tools,
+      sessionId: options.sessionId,
+      taskId: options.taskId,
     }),
     signal: controller.signal,
   })
@@ -402,6 +417,9 @@ export function chatLLMStreamEnhanced(options: LLMChatOptions, callbacks: SSECal
                 break;
               case 'delta':
                 callbacks.onDelta?.(data);
+                break;
+              case 'reasoning':
+                callbacks.onReasoning?.(data);
                 break;
               case 'done':
                 safeDone(data);
@@ -459,7 +477,7 @@ export async function getAvailableChannelFromStore(): Promise<{
   // 防御性 fallback：zustand persist 可能尚未 rehydrate，直接从 localStorage 读取
   if (channels.length === 0 && typeof localStorage !== 'undefined') {
     try {
-      const raw = localStorage.getItem('agentflow-data');
+      const raw = localStorage.getItem('lnagent-data');
       if (raw) {
         const parsed = JSON.parse(raw);
         const persistedChannels = parsed?.state?.channels || parsed?.channels;
@@ -547,6 +565,8 @@ export interface RoutedChatOptions {
   temperature?: number;
   maxTokens?: number;
   tools?: any[];
+  sessionId?: string; // Phase 1：会话持久化
+  taskId?: string;   // Phase 1：后台任务 ID
 }
 
 export interface RoutedChatResult extends LLMChatResult {
@@ -676,12 +696,17 @@ export function routedChatLLMStream(
         temperature: options.temperature,
         maxTokens: options.maxTokens,
         tools: options.tools,
+        sessionId: options.sessionId,
+        taskId: options.taskId,
       },
       {
         onStart: (data) => callbacks.onStart?.(data),
         onDelta: (data) => {
           fullContent = data.fullContent || fullContent;
           callbacks.onDelta?.(data);
+        },
+        onReasoning: (data) => {
+          callbacks.onReasoning?.(data);
         },
         onTool: (data) => callbacks.onTool?.(data),
         onDone: async (data) => {
@@ -713,12 +738,6 @@ export function routedChatLLMStream(
   });
 
   return controller;
-}
-
-// 获取 routerMemory 快照（供 selectModel 决策）
-async function getRouterMemorySnapshot() {
-  const { useStore } = await import('../store/useStore');
-  return useStore.getState().routerMemory;
 }
 
 // 从 store 读取路由偏好：如果 routerEnabled=false 且 defaultModelId 有值，直接使用指定模型
@@ -967,4 +986,303 @@ export async function streamA2ATask(
     if (err.name === 'AbortError') return;
     callbacks.onError?.(err.message);
   }
+}
+
+// ===== Phase 1: 会话持久化 / 断线恢复 =====
+
+export interface ChatMessageLike {
+  id: string;
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content: string;
+  timestamp?: string;
+  messageType?: string;
+  model?: string;
+  provider?: string;
+  attachments?: any[];
+}
+
+/** 从服务端 KV 恢复会话消息历史（KV 为 source of truth） */
+export async function fetchSessionMessages(sessionId: string): Promise<ChatMessageLike[]> {
+  try {
+    const data = await safeFetch<{ success: boolean; messages?: ChatMessageLike[]; message?: string }>(
+      `${API_BASE}/messages/session/${encodeURIComponent(sessionId)}`,
+      { method: 'GET' },
+      15000,
+      1,
+    );
+    if (!data.success) return [];
+    return data.messages || [];
+  } catch {
+    return [];
+  }
+}
+
+/** 查询后台任务状态（用于断线后轮询恢复） */
+export interface TaskStatus {
+  status: 'running' | 'done' | 'error';
+  sessionId?: string;
+  content?: string;
+  message?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+export async function pollTask(taskId: string): Promise<TaskStatus | null> {
+  try {
+    const data = await safeFetch<{ success: boolean; task?: TaskStatus; message?: string }>(
+      `${API_BASE}/tasks/${encodeURIComponent(taskId)}`,
+      { method: 'GET' },
+      10000,
+      1,
+    );
+    if (!data.success || !data.task) return null;
+    return data.task;
+  } catch {
+    return null;
+  }
+}
+
+/** 轮询任务直到完成/出错，返回最终状态 */
+export async function pollTaskUntilDone(
+  taskId: string,
+  onTick?: (status: TaskStatus) => void,
+  intervalMs = 2000,
+  maxAttempts = 90,
+): Promise<TaskStatus | null> {
+  for (let i = 0; i < maxAttempts; i++) {
+    const status = await pollTask(taskId);
+    if (status) {
+      onTick?.(status);
+      if (status.status === 'done' || status.status === 'error') return status;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+// ===== 视觉模型代理（Vision Proxy）=====
+// 当对话时选择的模型不支持视觉（无识图能力），自动切换到用户配置的识图模型
+// 分析完图片后，把分析结果作为文本回填到原消息，再交回原模型继续对话。
+
+/** 视觉能力判断启发式：基于模型名常见模式识别 */
+function inferSupportsVisionByName(modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  // 已知支持视觉的模型命名模式
+  const visionPatterns = [
+    'gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-4.1', 'gpt-4.5',
+    'claude-3', 'claude-4', 'claude-opus-4', 'claude-sonnet-4', 'claude-3.5', 'claude-3.7',
+    'gemini', 'gemini-1.5', 'gemini-2', 'gemini-pro-vision',
+    'qwen-vl', 'qwen2-vl', 'qwen2.5-vl', 'qvq',
+    'glm-4v', 'glm-4.5v', 'glm-4.6v',
+    'internvl', 'intern-vl',
+    'llava', 'llama-3.2-vision', 'llama-4',
+    'pixtral',
+    'deepseek-vl',
+    'o1', 'o3', 'o4',
+  ];
+  // 明确排除纯文本/embedding/语音模型
+  const textOnlyPatterns = ['embedding', 'tts', 'whisper', 'transcribe', 'audio', 'moderation', 'dall-e', 'stable-diffusion'];
+  if (textOnlyPatterns.some((p) => name.includes(p))) return false;
+  return visionPatterns.some((p) => name.includes(p));
+}
+
+/** 判断 store 中某个渠道+模型是否支持视觉 */
+export async function isModelSupportsVision(channelId?: string, modelName?: string): Promise<boolean> {
+  if (!channelId || !modelName) return false;
+  const { useStore } = await import('../store/useStore');
+  const state = useStore.getState();
+  const channel = state.channels.find((c) => c.id === channelId);
+  if (!channel) return false;
+  const model = channel.models.find((m) => m.name === modelName);
+  if (!model) return false;
+  // 优先使用显式标记
+  if (typeof model.supportsVision === 'boolean') return model.supportsVision;
+  // 退化到启发式判断
+  return inferSupportsVisionByName(model.name);
+}
+
+/** 从 store 读取用户配置的识图模型，并解析为渠道信息 */
+export async function getVisionChannel(): Promise<{
+  channelId: string;
+  provider: string;
+  baseUrl: string;
+  apiKey: string;
+  modelName: string;
+  modelDisplayName: string;
+} | null> {
+  const { useStore } = await import('../store/useStore');
+  const state = useStore.getState();
+  if (!state.visionModelId) return null;
+
+  // visionModelId 格式: "channelId:modelName"
+  const sepIdx = state.visionModelId.lastIndexOf(':');
+  if (sepIdx < 0) return null;
+  const channelId = state.visionModelId.slice(0, sepIdx);
+  const modelName = state.visionModelId.slice(sepIdx + 1);
+  const channel = state.channels.find((c) => c.id === channelId && c.enabled && c.apiKey);
+  if (!channel) return null;
+  const model = channel.models.find((m) => m.name === modelName);
+  if (!model) return null;
+
+  return {
+    channelId: channel.id,
+    provider: channel.provider,
+    baseUrl: channel.baseUrl,
+    apiKey: channel.apiKey,
+    modelName: model.name,
+    modelDisplayName: model.displayName || model.name,
+  };
+}
+
+/** 从消息列表中提取所有图片 URL（仅 image_url 类型片段） */
+export function extractImageUrls(messages: Array<{ content: string | ContentPart[] }>): string[] {
+  const urls: string[] = [];
+  for (const msg of messages) {
+    if (typeof msg.content === 'string') continue;
+    if (!Array.isArray(msg.content)) continue;
+    for (const part of msg.content) {
+      if (part.type === 'image_url' && part.image_url?.url) {
+        urls.push(part.image_url.url);
+      }
+    }
+  }
+  return urls;
+}
+
+/** 判断消息列表中是否包含图片输入 */
+export function hasImageInput(messages: Array<{ content: string | ContentPart[] }>): boolean {
+  return extractImageUrls(messages).length > 0;
+}
+
+/**
+ * 视觉代理：当当前模型不支持视觉时，调用识图模型分析图片，把分析结果作为文本回填。
+ *
+ * 流程：
+ * 1. 当前模型支持视觉 → 直接返回原 messages（无需代理）
+ * 2. 当前模型不支持视觉 + 用户未配置识图模型 → 返回原 messages（带警告）
+ * 3. 当前模型不支持视觉 + 配置了识图模型 → 调用识图模型分析所有图片 → 把图片替换为文本描述
+ *
+ * @param messages 原始消息列表
+ * @param currentChannelId 当前选择的渠道 ID
+ * @param currentModelName 当前选择的模型名
+ * @param onProgress 进度回调（可选，用于 UI 提示）
+ * @returns 处理后的消息列表（content 全部为 string，可直接传给纯文本模型）
+ */
+export async function visionProxy(
+  messages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string | ContentPart[]; name?: string }>,
+  currentChannelId: string,
+  currentModelName: string,
+  onProgress?: (msg: string) => void,
+): Promise<{
+  messages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string; name?: string }>;
+  proxied: boolean;
+  visionModelUsed?: string;
+  warning?: string;
+}> {
+  // 1. 当前模型支持视觉，无需代理
+  const currentSupportsVision = await isModelSupportsVision(currentChannelId, currentModelName);
+  if (currentSupportsVision) {
+    return {
+      messages: messages.map((m) => ({
+        ...m,
+        content: typeof m.content === 'string' ? m.content : m.content.map((p) => p.type === 'text' ? p.text : '').join(''),
+      })),
+      proxied: false,
+    };
+  }
+
+  // 2. 检测是否含图片输入
+  const imageUrls = extractImageUrls(messages);
+  if (imageUrls.length === 0) {
+    // 无图片，直接返回（统一为 string content）
+    return {
+      messages: messages.map((m) => ({
+        ...m,
+        content: typeof m.content === 'string' ? m.content : m.content.map((p) => p.type === 'text' ? p.text : '').join(''),
+      })),
+      proxied: false,
+    };
+  }
+
+  // 3. 获取识图模型渠道
+  const visionChannel = await getVisionChannel();
+  if (!visionChannel) {
+    // 未配置识图模型：保留原消息，但返回警告（图片信息会丢失，但保留文本）
+    const flattened = messages.map((m) => ({
+      ...m,
+      content: typeof m.content === 'string'
+        ? m.content
+        : m.content.map((p) => p.type === 'text' ? p.text : '[图片]').join(''),
+    }));
+    return {
+      messages: flattened,
+      proxied: false,
+      warning: '当前模型不支持视觉输入，且未配置识图模型。图片信息将丢失，请到「设置 → 模型偏好」配置识图模型。',
+    };
+  }
+
+  // 4. 调用识图模型逐张分析图片
+  onProgress?.(`正在使用 ${visionChannel.modelDisplayName} 分析 ${imageUrls.length} 张图片…`);
+
+  const imageDescriptions: string[] = [];
+  for (let i = 0; i < imageUrls.length; i++) {
+    const url = imageUrls[i];
+    try {
+      const result = await chatLLM({
+        channelId: visionChannel.channelId,
+        provider: visionChannel.provider as any,
+        baseUrl: visionChannel.baseUrl,
+        apiKey: visionChannel.apiKey,
+        model: visionChannel.modelName,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: `请详细描述这张图片的内容，包括可见的文本、UI 元素、数据、布局、颜色等关键信息。这是第 ${i + 1}/${imageUrls.length} 张图片，描述将作为上下文提供给后续对话。` },
+              { type: 'image_url', image_url: { url, detail: 'high' } },
+            ],
+          },
+        ],
+        temperature: 0.3,
+        maxTokens: 1024,
+      });
+
+      if (result.success && result.content) {
+        imageDescriptions.push(`【图片 ${i + 1} 分析结果（由 ${visionChannel.modelDisplayName} 提供）】\n${result.content}`);
+      } else {
+        imageDescriptions.push(`【图片 ${i + 1}】分析失败：${result.message || '未知错误'}`);
+      }
+    } catch (err: any) {
+      imageDescriptions.push(`【图片 ${i + 1}】分析异常：${err.message || '未知错误'}`);
+    }
+  }
+
+  // 5. 把图片分析结果回填到 messages 中
+  // 策略：将每条消息中的 image_url 片段替换为对应的文本描述
+  let descIdx = 0;
+  const processedMessages = messages.map((m) => {
+    if (typeof m.content === 'string') {
+      return { ...m, content: m.content };
+    }
+    const parts: string[] = [];
+    for (const part of m.content) {
+      if (part.type === 'text') {
+        parts.push(part.text);
+      } else if (part.type === 'image_url') {
+        // 用识图模型的分析结果替换图片
+        const desc = imageDescriptions[descIdx] || `[图片 ${descIdx + 1}（分析结果缺失）]`;
+        parts.push(desc);
+        descIdx++;
+      }
+    }
+    return { ...m, content: parts.join('\n\n') };
+  });
+
+  onProgress?.(`图片分析完成，已将 ${imageUrls.length} 张图片转为文本描述，继续对话…`);
+
+  return {
+    messages: processedMessages,
+    proxied: true,
+    visionModelUsed: visionChannel.modelDisplayName,
+  };
 }

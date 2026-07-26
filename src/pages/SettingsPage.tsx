@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Plus,
   Settings,
@@ -33,6 +34,8 @@ import {
   MessageSquare,
   Brain,
   Clock,
+  Puzzle,
+  ExternalLink,
 } from 'lucide-react';
 import { useStore, providerPresets } from '../store/useStore';
 import { cn } from '../lib/utils';
@@ -62,6 +65,26 @@ interface ChannelForm {
 
 function genModelId(): string {
   return Date.now().toString() + Math.random().toString(36).slice(2, 6);
+}
+
+/** 启发式判断模型是否支持视觉输入（与 llmApi 中的逻辑保持一致） */
+function inferSupportsVisionByName(modelName: string): boolean {
+  const name = modelName.toLowerCase();
+  const visionPatterns = [
+    'gpt-4o', 'gpt-4-turbo', 'gpt-4-vision', 'gpt-4.1', 'gpt-4.5',
+    'claude-3', 'claude-4', 'claude-opus-4', 'claude-sonnet-4', 'claude-3.5', 'claude-3.7',
+    'gemini', 'gemini-1.5', 'gemini-2', 'gemini-pro-vision',
+    'qwen-vl', 'qwen2-vl', 'qwen2.5-vl', 'qvq',
+    'glm-4v', 'glm-4.5v', 'glm-4.6v',
+    'internvl', 'intern-vl',
+    'llava', 'llama-3.2-vision', 'llama-4',
+    'pixtral',
+    'deepseek-vl',
+    'o1', 'o3', 'o4',
+  ];
+  const textOnlyPatterns = ['embedding', 'tts', 'whisper', 'transcribe', 'audio', 'moderation', 'dall-e', 'stable-diffusion'];
+  if (textOnlyPatterns.some((p) => name.includes(p))) return false;
+  return visionPatterns.some((p) => name.includes(p));
 }
 
 function maskApiKey(key: string): string {
@@ -124,6 +147,7 @@ function parseHeaders(text: string): Record<string, string> {
 type SettingsTab = 'providers' | 'models' | 'agent' | 'mcp' | 'display' | 'about';
 
 export function SettingsPage() {
+  const navigate = useNavigate();
   const {
     channels,
     addChannel,
@@ -137,9 +161,11 @@ export function SettingsPage() {
     setMCPStatus,
     defaultModelId,
     routerEnabled,
+    visionModelId,
     theme,
     setDefaultModelId,
     setRouterEnabled,
+    setVisionModelId,
     setTheme,
   } = useStore();
 
@@ -921,6 +947,57 @@ export function SettingsPage() {
             </div>
           </div>
 
+          {/* 识图模型选择 */}
+          <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+            <div className="flex items-center gap-2 mb-2">
+              <Eye className="w-5 h-5 text-accent" />
+              <h2 className="text-base font-semibold text-text-primary">识图模型</h2>
+              <span className="text-xs text-text-tertiary font-normal">
+                （对话含图片且当前模型无视觉能力时自动切换）
+              </span>
+            </div>
+            <p className="text-xs text-text-tertiary mb-3 leading-relaxed">
+              当对话中包含图片、但当前使用的模型不支持视觉输入时，系统会自动调用此识图模型分析图片，
+              再将分析结果回填给原模型继续对话，实现「无视觉能力模型」也能处理图片的需求。
+            </p>
+
+            {availableModels.length === 0 ? (
+              <div className="text-xs text-text-tertiary py-3 text-center border border-dashed border-border rounded-md bg-bg-secondary">
+                请先在「渠道」标签页添加并启用渠道
+              </div>
+            ) : (
+              <div className="relative">
+                <select
+                  value={visionModelId || ''}
+                  onChange={(e) => setVisionModelId(e.target.value || null)}
+                  className="w-full pl-3 pr-9 py-2.5 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent bg-white appearance-none"
+                >
+                  <option value="">未配置识图模型（图片将仅作文本占位）</option>
+                  {availableModels.map((m) => {
+                    const supportsVision = inferSupportsVisionByName(m.model.name) || (m.model as any).supportsVision === true;
+                    return (
+                      <option key={`vision-${m.channelId}:${m.model.name}`} value={`${m.channelId}:${m.model.name}`}>
+                        {m.model.displayName || m.model.name} · {providerLabels[m.provider as Provider] || m.channelName}
+                        {supportsVision ? ' ✓ 视觉' : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+                <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary pointer-events-none" />
+              </div>
+            )}
+
+            {visionModelId && (
+              <div className="mt-3 p-3 bg-blue-50 border border-blue-100 rounded-md text-xs text-blue-700">
+                <div className="flex items-center gap-1.5 mb-1 font-medium">
+                  <Eye className="w-3.5 h-3.5" />
+                  视觉代理已启用
+                </div>
+                对话含图片且当前模型不支持视觉时，将自动使用此模型分析图片并将结果回填。
+              </div>
+            )}
+          </div>
+
           {/* 可用模型池概览 */}
           <div className="bg-white border border-border rounded-xl p-4 md:p-5">
             <div className="flex items-center gap-2 mb-4">
@@ -959,17 +1036,23 @@ export function SettingsPage() {
                       <div className="flex flex-wrap gap-1.5">
                         {chModels.map((m) => {
                           const isActive = defaultModelId === `${m.channelId}:${m.model.name}`;
+                          const isVision = visionModelId === `${m.channelId}:${m.model.name}`;
+                          const supportsVision = inferSupportsVisionByName(m.model.name) || (m.model as any).supportsVision === true;
                           return (
                             <span
                               key={`${m.channelId}:${m.model.name}`}
                               className={cn(
-                                'px-2 py-0.5 text-[11px] rounded-md border transition-colors',
+                                'px-2 py-0.5 text-[11px] rounded-md border transition-colors inline-flex items-center gap-1',
                                 isActive
                                   ? 'bg-accent-bg text-accent border-accent/30 font-medium'
                                   : 'bg-white text-text-secondary border-border'
                               )}
+                              title={supportsVision ? '支持视觉输入' : '纯文本模型'}
                             >
                               {m.model.displayName || m.model.name}
+                              {supportsVision && (
+                                <Eye className={cn('w-3 h-3', isVision ? 'text-accent' : 'text-text-tertiary')} />
+                              )}
                             </span>
                           );
                         })}
@@ -1344,13 +1427,14 @@ export function SettingsPage() {
                         mcps: useStore().mcps,
                         routerEnabled: useStore().routerEnabled,
                         defaultModelId: useStore().defaultModelId,
+                        visionModelId: useStore().visionModelId,
                         theme: useStore().theme,
                       }, null, 2);
                       const blob = new Blob([data], { type: 'application/json' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
-                      a.download = `agentflow-settings-${new Date().toISOString().slice(0, 10)}.json`;
+                      a.download = `lnagent-settings-${new Date().toISOString().slice(0, 10)}.json`;
                       a.click();
                       URL.revokeObjectURL(url);
                       showToast('设置已导出');
@@ -1394,6 +1478,7 @@ export function SettingsPage() {
                           }
                           if (data.routerEnabled !== undefined) useStore().setRouterEnabled(data.routerEnabled);
                           if (data.defaultModelId) useStore().setDefaultModelId(data.defaultModelId);
+                          if (data.visionModelId !== undefined) useStore().setVisionModelId(data.visionModelId || null);
                           if (data.theme) useStore().setTheme(data.theme);
                           showToast('设置已导入');
                         } catch {
@@ -1423,7 +1508,7 @@ export function SettingsPage() {
               <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500 to-pink-500 flex items-center justify-center mx-auto mb-4 shadow-lg">
                 <Sparkles className="w-8 h-8 text-white" />
               </div>
-              <h2 className="text-xl font-bold text-text-primary mb-1">AgentFlow</h2>
+              <h2 className="text-xl font-bold text-text-primary mb-1">LNAgent</h2>
               <p className="text-sm text-text-secondary mb-3">智能 Agent 工作流编排平台</p>
               <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-bg-secondary rounded-md border border-border text-xs text-text-tertiary">
                 <span>版本</span>
@@ -1479,6 +1564,28 @@ export function SettingsPage() {
                   <Globe className="w-4 h-4" />
                   线上演示站点
                 </a>
+              </div>
+            </div>
+
+            {/* 插件市场入口 */}
+            <div className="bg-white border border-border rounded-xl p-4 md:p-5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-violet-50 flex items-center justify-center flex-shrink-0">
+                    <Puzzle className="w-5 h-5 text-violet-600" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">插件市场</h3>
+                    <p className="text-xs text-text-tertiary">浏览和安装插件，扩展 Agent 能力</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => navigate('/market')}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-accent bg-accent-bg hover:bg-accent-bg-hover border border-accent/20 rounded-md transition-colors"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  打开插件市场
+                </button>
               </div>
             </div>
           </div>
@@ -1772,7 +1879,7 @@ export function SettingsPage() {
                     className="w-full px-3 py-2 text-sm border border-border rounded-md focus:outline-none focus:border-accent focus:ring-1 focus:ring-accent font-mono"
                   />
                   <p className="text-xs text-text-tertiary mt-1.5">
-                    该目录位于 AgentFlow 后端服务器上，连接后 AI 将能直接读写其中的文件。
+                    该目录位于 LNAgent 后端服务器上，连接后 AI 将能直接读写其中的文件。
                   </p>
                 </div>
               ) : (

@@ -1,4 +1,4 @@
-import { Workflow, ExternalLink, CheckCircle, MessageSquare, Edit3 } from 'lucide-react';
+﻿import { Workflow, ExternalLink, CheckCircle, MessageSquare, Edit3 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { Workflow as WorkflowType } from '../../../types';
 import { cn } from '../../../lib/utils';
@@ -27,7 +27,7 @@ const nodeColorMap: Record<string, string> = {
   host: '#64748b',
   knowledge: '#a855f7',
   template: '#84cc16',
-  'human-in-loop': '#fb923c',
+  'human_in_loop': '#fb923c',
   subworkflow: '#0ea5e9',
 };
 
@@ -36,7 +36,7 @@ const nodeTypeAbbr: Record<string, string> = {
   start: '开始', end: '结束', llm: 'AI', agent: '助手', subagent: '子A', a2a: 'A2A',
   code: '代码', http: 'HTTP', condition: '分支', loop: '循环', variable: '变量',
   database: 'DB', host: '主机', knowledge: '知识', template: '模板',
-  'human-in-loop': '人工', subworkflow: '子流',
+  'human_in_loop': '人工', subworkflow: '子流',
 };
 
 export function WorkflowPreview({ workflow, className, onRefine }: WorkflowPreviewProps) {

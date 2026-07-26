@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Markdown 渲染 — 对标所有成熟产品的 Markdown + 代码块
  * 替代纯文本 whitespace-pre-wrap，支持代码高亮、加粗、链接等
  */

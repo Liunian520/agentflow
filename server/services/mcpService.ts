@@ -251,7 +251,7 @@ export async function connectMcp(config: McpServerConfig): Promise<{ tools: McpT
     await stdioRpc(session, 'initialize', {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: 'AgentFlow', version: '1.0.0' },
+      clientInfo: { name: 'LNAgent', version: '1.0.0' },
     });
     await stdioRpc(session, 'notifications/initialized', {}, true).catch(() => {});
 
@@ -274,7 +274,7 @@ export async function connectMcp(config: McpServerConfig): Promise<{ tools: McpT
   await rpc(session, 'initialize', {
     protocolVersion: PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: 'AgentFlow', version: '1.0.0' },
+    clientInfo: { name: 'LNAgent', version: '1.0.0' },
   });
 
   // 发送 initialized 通知（部分服务器要求）
@@ -315,18 +315,55 @@ export async function callMcpTool(serverId: string, name: string, args: any): Pr
 }
 
 // 按工具名在所有已连接服务器中查找并执行（供 LLM 代理的工具循环使用）
+// 工具名可能有两种形式：
+//   1. 原始名 "search"（向后兼容）
+//   2. 命名空间名 "serverName__search"（前端组装的格式）
+// 命名空间名优先匹配，避免不同 server 下同名工具冲突
 export async function executeMcpToolByName(name: string, args: any): Promise<string> {
-  for (const session of sessions.values()) {
-    if (session.tools.some((t) => t.name === name)) {
+  // 解析命名空间格式：serverName__toolName
+  const sepIdx = name.indexOf('__');
+  let serverHint = '';
+  let toolName = name;
+  if (sepIdx > 0) {
+    serverHint = name.slice(0, sepIdx);
+    toolName = name.slice(sepIdx + 2);
+  }
+
+  // 优先按 server hint 匹配
+  if (serverHint) {
+    for (const session of sessions.values()) {
+      if (session.config.name !== serverHint) continue;
+      const tool = session.tools.find((t) => t.name === toolName);
+      if (!tool) continue;
       try {
-        const r = await callMcpTool(session.config.id, name, args || {});
-        return r.content;
+        const r = await callMcpTool(session.config.id, toolName, args || {});
+        return JSON.stringify({
+          success: true,
+          message: `工具 ${name} 执行完成`,
+          result: r.content,
+        });
       } catch (e: any) {
-        return `[工具执行失败: ${e.message}]`;
+        return JSON.stringify({ success: false, message: `工具执行失败: ${e.message}` });
       }
     }
   }
-  return `[未找到提供工具 "${name}" 的 MCP 服务器]`;
+
+  // 降级：在所有 session 中按原始 toolName 查找
+  for (const session of sessions.values()) {
+    if (session.tools.some((t) => t.name === toolName)) {
+      try {
+        const r = await callMcpTool(session.config.id, toolName, args || {});
+        return JSON.stringify({
+          success: true,
+          message: `工具 ${name} 执行完成`,
+          result: r.content,
+        });
+      } catch (e: any) {
+        return JSON.stringify({ success: false, message: `工具执行失败: ${e.message}` });
+      }
+    }
+  }
+  return JSON.stringify({ success: false, message: `未找到提供工具 "${name}" 的 MCP 服务器` });
 }
 
 // ===== Express 路由 =====

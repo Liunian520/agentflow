@@ -18,11 +18,13 @@ import {
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useStore } from '../../store/useStore';
 import { cn } from '../../lib/utils';
+import { MemoryPanel } from '../chat/MemoryPanel';
+import { FeatureHints } from '../chat/FeatureHints';
 
 const navItems = [
   { to: '/workspace', icon: MessageSquare, label: '对话工作台' },
   { to: '/dashboard', icon: LayoutGrid, label: '工作台' },
-  { to: '/workflows', icon: Workflow, label: '工作流' },
+  { to: '/workflows', icon: Workflow, label: '技能库' },
   { to: '/agents', icon: Bot, label: 'Agent' },
   { to: '/hosts', icon: Server, label: '远程主机' },
   { to: '/marketplace', icon: Puzzle, label: '插件市场' },
@@ -68,7 +70,7 @@ export function Sidebar() {
             <div className="w-8 h-8 rounded-lg bg-accent flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-white" />
             </div>
-            <span className="font-semibold text-text-primary">AgentFlow</span>
+            <span className="font-semibold text-text-primary">LNAgent</span>
           </div>
         )}
         {sidebarCollapsed && (
@@ -171,6 +173,12 @@ export function Sidebar() {
                 )}
               </div>
             </div>
+
+            {/* 记忆面板：展示已保存的用户偏好和决策 */}
+            <MemoryPanel />
+
+            {/* 渐进式能力提示：功能被使用后展示相关高级能力引导 */}
+            <FeatureHints />
 
             <div className="mt-6 px-3">
               <div className="relative">

@@ -1,0 +1,133 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  password  String
+  role      String   @default("user")
+  avatar    String?
+  createdAt DateTime @default(now())
+}
+
+model Workflow {
+  id          String   @id @default(uuid())
+  name        String
+  description String   @default("")
+  nodes       String   @default("[]")
+  edges       String   @default("[]")
+  status      String   @default("draft")
+  runs        Int      @default(0)
+  variables   String   @default("{}")
+  metaSkill   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model Agent {
+  id           String   @id @default(uuid())
+  name         String
+  description  String   @default("")
+  avatar       String   @default("")
+  model        String   @default("")
+  systemPrompt String   @default("")
+  tools        String   @default("[]")
+  temperature  Float?
+  maxTokens    Int?
+  createdAt    DateTime @default(now())
+}
+
+model Channel {
+  id        String   @id @default(uuid())
+  name      String
+  provider  String
+  apiKey    String
+  baseUrl   String   @default("")
+  models    String   @default("[]")
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+}
+
+model ChatMessage {
+  id          String   @id @default(uuid())
+  sessionId   String
+  role        String
+  content     String
+  agentId     String?
+  toolName    String?
+  toolArgs    String?
+  toolResult  String?
+  messageType String?
+  metadata    String?
+  attachments String?
+  timestamp   DateTime @default(now())
+
+  @@index([sessionId, timestamp])
+}
+
+model FactualMemory {
+  id             String   @id @default(uuid())
+  type           String
+  content        String
+  tags           String   @default("[]")
+  keywords       String   @default("[]")
+  source         String   @default("")
+  sessionId      String?
+  messageId      String?
+  importance     Float    @default(0.5)
+  accessCount    Int      @default(0)
+  lastAccessedAt DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model ExperientialReflection {
+  id                String   @id @default(uuid())
+  timestamp         DateTime @default(now())
+  trigger           String   @default("")
+  summary           String   @default("")
+  principles        String   @default("[]")
+  layer             String   @default("")
+  basedOnTraceIds   String   @default("[]")
+  basedOnTraceCount Int      @default(0)
+}
+
+model ExecutionTrace {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  userInput    String   @default("")
+  plan         String   @default("[]")
+  outcome      String   @default("success")
+  resultData   String   @default("{}")
+  failureModes String?
+  agentIds     String?
+  workflowId   String?
+  duration     Int?
+}
+
+model RouterRecord {
+  id           String   @id @default(uuid())
+  timestamp    DateTime @default(now())
+  taskFeatures String   @default("{}")
+  channelId    String
+  modelName    String
+  provider     String
+  outcome      String   @default("success")
+  score        Float    @default(0)
+  latencyMs    Int      @default(0)
+  estTokens    Int      @default(0)
+}
+
+model KnowledgeDoc {
+  id        String   @id @default(uuid())
+  title     String
+  content   String
+  embedding String?
+  source    String   @default("upload")
+  createdAt DateTime @default(now())
+}

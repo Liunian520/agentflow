@@ -1,4 +1,4 @@
-import { Bot, Eye, Edit3 } from 'lucide-react';
+﻿import { Bot, Eye, Edit3 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import type { Agent } from '../../../types';
 import { cn } from '../../../lib/utils';

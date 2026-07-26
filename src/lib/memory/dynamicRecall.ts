@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Dynamic Recall — 动态按需召回（tengu_moth_copse）
  *
  * 参考：Claude Code tengu_moth_copse（frontmatter扫描→Sonnet从200个候选挑≤5→注入user message）

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 模式选择器 — 对标 Kilo Code 多模式系统
  * Plan: 只分析不执行 | Code: 执行需确认 | Debug: 自动调试 | Orchestrator: 协调多任务
  */

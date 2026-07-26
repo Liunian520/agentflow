@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Multi-Trajectory Rollout — Skill-MAS 论文 Phase 4
  *
  * 为复杂需求生成多个候选编排方案（通过温度变化 + 策略扰动产生有意义的差异），

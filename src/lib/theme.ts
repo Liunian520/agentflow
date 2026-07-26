@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 主题应用工具
  * - 'light' / 'dark'：直接在 <html> 上增删 .dark 类
  * - 'system'：跟随系统 prefers-color-scheme，并监听其变化实时切换

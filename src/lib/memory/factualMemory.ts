@@ -1,4 +1,4 @@
-/**
+﻿/**
  * L1 Factual Memory — 跨会话事实记忆 CRUD + 检索 + 去重 + 容量管理
  *
  * 参考：Claude Code Auto Memory Extraction（4 类分类法 + frontmatter 扫描）

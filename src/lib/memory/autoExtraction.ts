@@ -17,6 +17,7 @@ import type {
   FactualMemoryType,
 } from '../../types';
 import { useStore } from '../../store/useStore';
+import { memoryApi } from '../../api/memoryApi';
 import { routedChatLLM } from '../../api/llmApi';
 import { extractTaskFeatures } from '../modelRouter';
 import {
@@ -97,10 +98,16 @@ export async function extractFactsWithLLM(
   }
 
   // 2. 检查主Agent互斥：如果本轮中有 memory_save 工具调用，跳过提取
+  //    ChatWorkspacePage 的 onTool 回调不会创建 role:'tool' 消息，
+  //    而是把 memory_save 成功记录写入最近 assistant 消息的 metadata.savedMemories，
+  //    这里两种标记都检查以保持向后兼容
   const hasSelfEditCall = windowMessages.some(
     (m) => m.role === 'tool' && m.toolName?.startsWith('memory_')
   );
-  if (hasSelfEditCall) {
+  const lastAssistantWithMem = [...windowMessages].reverse().find(
+    (m) => m.role === 'assistant' && (m as any).metadata?.savedMemories?.length > 0
+  );
+  if (hasSelfEditCall || lastAssistantWithMem) {
     return { extracted: [], method: 'skipped_self_edit', cursorUpdated: false };
   }
 
@@ -194,8 +201,15 @@ export async function extractFactsWithLLM(
       updateExtractionCursor(sessionId, lastMessageId);
     }
 
-    // 7. 写入 Store
+    // 7. 写入后端 + Store
     if (extracted.length > 0) {
+      for (const memory of extracted) {
+        try {
+          await memoryApi.addFactualMemory(memory);
+        } catch (e) {
+          console.warn('Failed to persist factual memory:', e);
+        }
+      }
       store.setFactualMemory([...store.factualMemory, ...extracted]);
       store.addMemoryAudit({
         layer: 'L1',
@@ -272,8 +286,11 @@ export function fallbackKeywordExtraction(
     extracted.push(memory);
   }
 
-  // 写入 Store
+  // 写入后端 + Store
   if (extracted.length > 0) {
+    for (const memory of extracted) {
+      memoryApi.addFactualMemory(memory).catch(() => {});
+    }
     store.setFactualMemory([...store.factualMemory, ...extracted]);
     store.addMemoryAudit({
       layer: 'L1',

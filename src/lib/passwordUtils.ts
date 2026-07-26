@@ -1,9 +1,9 @@
-/**
+﻿/**
  * 密码哈希工具 — 使用 Web Crypto API (SHA-256)
  * 不存储明文密码，仅存储哈希值用于验证
  */
 
-const SALT_PREFIX = 'agentflow_';
+const SALT_PREFIX = 'lnagent_';
 
 /** 对密码进行 SHA-256 哈希（加盐） */
 export async function hashPassword(password: string): Promise<string> {

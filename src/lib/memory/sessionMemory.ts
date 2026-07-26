@@ -119,6 +119,42 @@ export function quickUpdateFromMessages(
   memory: SessionMemory,
   messages: ChatMessage[]
 ): SessionMemory {
+  // 提取工作流相关消息（不限于最近3条）
+  const workflowMessages = messages.filter(m =>
+    m.messageType === 'workflow_preview' ||
+    m.content.includes('工作流') ||
+    m.content.includes('Workflow') ||
+    m.metadata?.workflow ||
+    m.metadata?.workflowId
+  );
+
+  // 更新 workflow section
+  if (workflowMessages.length > 0) {
+    const latestWorkflow = workflowMessages[workflowMessages.length - 1];
+    const wfName = latestWorkflow.metadata?.workflow?.name || latestWorkflow.metadata?.workflowName || '未命名';
+    memory = updateSessionSection(
+      memory,
+      'workflow',
+      `当前工作流: ${wfName}\n描述: ${latestWorkflow.content.slice(0, 200)}`
+    );
+  }
+
+  // 更新 task_spec section
+  const taskMessages = messages.filter(m =>
+    m.content.includes('任务') ||
+    m.content.includes('需求') ||
+    m.content.includes('帮我') ||
+    m.content.includes('设计') ||
+    m.content.includes('创建')
+  );
+  if (taskMessages.length > 0) {
+    memory = updateSessionSection(
+      memory,
+      'task_spec',
+      taskMessages[taskMessages.length - 1].content.slice(0, 300)
+    );
+  }
+
   const recentMessages = messages.slice(-3);
 
   // 更新 current_state：取最后一条 assistant 消息的内容摘要

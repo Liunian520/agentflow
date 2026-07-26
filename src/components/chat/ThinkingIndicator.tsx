@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 思考过程展示 — 对标 Claude Code Extended Thinking
  * 透明展示 Agent 的推理步骤，而非仅显示"正在处理..."
  */

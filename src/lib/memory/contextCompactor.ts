@@ -3,8 +3,12 @@
  *
  * 参考：Codex Handoff Summary（95%容量触发，保留最近20K token，删除assistant回复，蒸馏更早消息）
  * 参考：Claude Code Session Memory 与 Compact 协作（优先复用 sessionMemory 的 context_summary）
+ * 参考：Headroom AI — 智能上下文压缩层（60-95% token 节省，CCR 可逆压缩）
  *
- * 降级兜底：模板拼接（角色+前100字符）
+ * 压缩优先级：
+ * 1. Headroom AI（如果 proxy 可用） — 最高质量，支持 CCR 可逆压缩
+ * 2. Session Memory context_summary — 快路径复用已有摘要
+ * 3. 模板拼接 — 降级兜底
  */
 
 import type { ChatMessage, HandoffSummary } from '../../types';
@@ -14,6 +18,7 @@ import {
 } from './types';
 import type { SessionMemory } from '../../types';
 import { estimateConversationTokens, estimateTokens } from './sessionMemory';
+import { compressWithHeadroom } from '../../api/pluginApi';
 
 // ===== 触发判断 =====
 
@@ -55,6 +60,45 @@ export function splitMessagesForCompact(
   };
 }
 
+// ===== Headroom 压缩（最高质量） =====
+
+/** Headroom 压缩：通过后端 Headroom proxy 进行智能上下文压缩 */
+export async function compactWithHeadroom(
+  toCompact: ChatMessage[]
+): Promise<{ summary: string; method: 'headroom'; ccrHashes?: string[] } | null> {
+  try {
+    // 转换为 OpenAI 格式消息
+    const openaiMessages = toCompact.map(m => ({
+      role: m.role as 'user' | 'assistant' | 'system' | 'tool',
+      content: m.content,
+    }));
+
+    const result = await compressWithHeadroom(openaiMessages);
+
+    if (result && result.compressed && result.messages) {
+      // 提取压缩后的文本摘要
+      const compressedContent = result.messages
+        .map((m: any) => {
+          const role = m.role || '?';
+          const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+          return `${role}: ${content}`;
+        })
+        .join('\n');
+
+      return {
+        summary: `## 历史对话摘要（Headroom 智能压缩，节省 ${result.tokensSaved || 0} tokens）\n${compressedContent}`,
+        method: 'headroom',
+        ccrHashes: result.ccrHashes || [],
+      };
+    }
+
+    return null;
+  } catch {
+    // Headroom 不可用时降级到其他压缩方式
+    return null;
+  }
+}
+
 // ===== 快路径：复用 Session Memory context_summary =====
 
 /** 快路径压缩：复用 sessionMemory 的 context_summary section（零额外 LLM 调用） */
@@ -79,18 +123,41 @@ export function compactWithSessionSummary(
 export function compactWithTemplate(
   toCompact: ChatMessage[]
 ): { summary: string; method: 'template' } {
-  const lines = toCompact.map((m) => {
-    const roleLabel = {
-      user: '用户',
-      assistant: '助手',
-      system: '系统',
-      tool: `工具(${m.toolName || '?'})`,
-    }[m.role];
-    const snippet = m.content.slice(0, 100);
-    return `${roleLabel}: ${snippet}`;
-  });
+  // 优先提取工作流相关消息
+  const workflowMessages = toCompact.filter(m =>
+    m.messageType === 'workflow_preview' ||
+    m.content.includes('工作流') ||
+    m.content.includes('Workflow') ||
+    m.metadata?.workflow ||
+    m.metadata?.workflowId
+  );
 
-  const summary = `## 历史对话摘要（模板压缩）\n${lines.join('\n')}`;
+  const roleLabel = (m: ChatMessage) => ({
+    user: '用户',
+    assistant: '助手',
+    system: '系统',
+    tool: `工具(${m.toolName || '?'})`,
+  }[m.role]);
+
+  const lines: string[] = ['## 历史对话摘要（模板压缩）'];
+
+  if (workflowMessages.length > 0) {
+    lines.push('\n【工作流相关】');
+    workflowMessages.forEach((m, i) => {
+      lines.push(`${i + 1}. ${roleLabel(m)}: ${m.content.slice(0, 150)}`);
+    });
+  }
+
+  // 保留最近3条非工作流消息
+  const otherMessages = toCompact.filter(m => !workflowMessages.includes(m)).slice(-3);
+  if (otherMessages.length > 0) {
+    lines.push('\n【近期消息】');
+    otherMessages.forEach((m, i) => {
+      lines.push(`${i + 1}. ${roleLabel(m)}: ${m.content.slice(0, 100)}`);
+    });
+  }
+
+  const summary = lines.join('\n');
   return { summary, method: 'template' };
 }
 
@@ -103,7 +170,61 @@ export function compactWithTemplate(
 
 // ===== 完整压缩流程 =====
 
-/** 执行完整的上下文压缩流程 */
+/** 执行完整的上下文压缩流程（异步，支持 Headroom 压缩） */
+export async function compactConversationAsync(
+  messages: ChatMessage[],
+  maxTokens: number,
+  sessionMemory?: SessionMemory,
+  sessionId?: string
+): Promise<{
+  compactedMessages: ChatMessage[];
+  handoffSummary: HandoffSummary;
+  method: 'headroom' | 'session_summary' | 'template';
+}> {
+  const { preserved, toCompact } = splitMessagesForCompact(messages, maxTokens);
+
+  // 优先尝试 Headroom 压缩（异步）
+  let headroomResult = await compactWithHeadroom(toCompact);
+
+  let result: { summary: string; method: 'headroom' | 'session_summary' | 'template' };
+  let ccrHashes: string[] = [];
+
+  if (headroomResult) {
+    result = headroomResult;
+    ccrHashes = headroomResult.ccrHashes || [];
+  } else if (sessionMemory) {
+    result = compactWithSessionSummary(toCompact, sessionMemory);
+  } else {
+    result = compactWithTemplate(toCompact);
+  }
+
+  // 构造压缩后的消息列表：summary 作为 system 消息 + preserved 消息
+  const summaryMessage: ChatMessage = {
+    id: `compact-${Date.now()}`,
+    role: 'system',
+    content: result.summary,
+    timestamp: new Date().toISOString(),
+    messageType: 'text',
+    metadata: ccrHashes.length > 0 ? { headroomCcrHashes: ccrHashes } : undefined,
+  };
+
+  const compactedMessages = [summaryMessage, ...preserved];
+
+  // 生成 HandoffSummary 记录
+  const handoffSummary: HandoffSummary = {
+    id: `hs-${Date.now()}`,
+    timestamp: new Date().toISOString(),
+    sessionId: sessionId || 'unknown',
+    summary: result.summary,
+    preservedMessageCount: preserved.length,
+    compactedMessageCount: toCompact.length,
+    triggerTokenCount: estimateConversationTokens(messages),
+  };
+
+  return { compactedMessages, handoffSummary, method: result.method };
+}
+
+/** 同步版压缩流程（不使用 Headroom，用于兼容旧调用） */
 export function compactConversation(
   messages: ChatMessage[],
   maxTokens: number,

@@ -34,6 +34,16 @@ export const MEMORY_SAVE_SCHEMA = {
         type: 'string',
         description: '事实内容描述（≤200字）',
       },
+      tags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '简短关键词标签，便于后续检索（如 ["typescript", "函数式"]）',
+      },
+      keywords: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '检索关键词（通常与 tags 一致即可）',
+      },
       importance: {
         type: 'number',
         description: '重要程度 0-1（默认 0.7）',

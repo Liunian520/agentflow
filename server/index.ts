@@ -6,6 +6,17 @@ import { SSHService } from './services/sshService';
 import llmProxyRouter from './services/llmProxy';
 import { registerMcpRoutes } from './services/mcpService';
 import a2aRouter from './services/a2aService';
+import { prisma } from './db';
+import workflowsRouter from './routes/workflows';
+import agentsRouter from './routes/agents';
+import channelsRouter from './routes/channels';
+import messagesRouter from './routes/messages';
+import memoryRouter from './routes/memory';
+import knowledgeRouter from './routes/knowledge';
+import dashboardRouter from './routes/dashboard';
+import dbQueryRouter from './routes/dbQuery';
+import pluginsRouter from './routes/plugins';
+import { registerHeadroomRoutes } from './services/headroomService';
 
 dotenv.config();
 
@@ -52,6 +63,24 @@ app.use('/api', mcpRouter);
 
 // Phase 11：A2A (Agent-to-Agent) 协议代理
 app.use('/api', a2aRouter);
+
+// Data persistence routes
+app.use('/api/workflows', workflowsRouter);
+app.use('/api/agents', agentsRouter);
+app.use('/api/channels', channelsRouter);
+app.use('/api/messages', messagesRouter);
+app.use('/api/memory', memoryRouter);
+app.use('/api/knowledge', knowledgeRouter);
+app.use('/api/dashboard', dashboardRouter);
+app.use('/api/db/query', dbQueryRouter);
+
+// 插件管理路由
+app.use('/api/plugins', pluginsRouter);
+
+// Headroom proxy 路由
+const headroomRouter = express.Router();
+registerHeadroomRoutes(headroomRouter);
+app.use('/api/headroom', headroomRouter);
 
 const sshService = new SSHService();
 
@@ -180,6 +209,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`SSH Server running on port ${PORT}`);
+async function startServer() {
+  await prisma.$connect();
+  console.log('Database connected via Prisma');
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`LNAgent Server running on port ${PORT}`);
+  });
+}
+
+startServer().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });

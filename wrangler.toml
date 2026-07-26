@@ -1,10 +1,6 @@
-name = "agentflow"
+name = "lnagent"
 compatibility_date = "2026-07-21"
 
 pages_build_output_dir = "dist"
-build_command = "npm run build"
-production_branch = "main"
 
-[vars]
-
-[env.production]
+[env.production.vars]

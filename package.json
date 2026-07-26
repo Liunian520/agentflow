@@ -1,5 +1,5 @@
 {
-  "name": "agentflow",
+  "name": "lnagent",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,18 +9,27 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "server": "tsx server/index.ts",
-    "deploy": "npm run build && wrangler pages deploy dist --project-name=agentflow",
-    "deploy:staging": "npm run build && wrangler pages deploy dist --project-name=agentflow --branch=staging"
+    "db:migrate": "prisma migrate dev",
+    "db:generate": "prisma generate",
+    "db:studio": "prisma studio",
+    "deploy": "npm run build && wrangler pages deploy dist --project-name=lnagent",
+    "deploy:staging": "npm run build && wrangler pages deploy dist --project-name=lnagent --branch=staging",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
+    "@prisma/client": "^7.9.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.25",
     "@types/ssh2": "^1.15.5",
+    "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^4.22.2",
+    "headroom-ai": "^0.22.4",
     "lucide-react": "^1.25.0",
+    "prisma": "^7.9.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1",
@@ -41,6 +50,7 @@
     "tsx": "^4.23.1",
     "typescript": "~6.0.2",
     "vite": "^8.1.1",
+    "vitest": "^4.1.10",
     "wrangler": "^4.112.0"
   }
 }

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 操作执行器 — 将意图解析结果映射为 Zustand store 操作
  */
 
@@ -6,14 +6,14 @@ import type { ParsedIntent, ActionResult } from '../../../types';
 import { useStore } from '../../../store/useStore';
 import { generateId } from '../../../lib/utils';
 
-export function executeAction(intent: ParsedIntent): ActionResult {
+export async function executeAction(intent: ParsedIntent): Promise<ActionResult> {
   const store = useStore.getState();
 
   switch (intent.action) {
     case 'create_agent': {
       try {
         const { name, description, model, systemPrompt, tools, temperature, avatar } = intent.params;
-        store.createAgent({
+        await store.createAgent({
           name: name || '新助手',
           description: description || 'AI 助手',
           model: model || 'GPT-4o',
@@ -37,7 +37,7 @@ export function executeAction(intent: ParsedIntent): ActionResult {
     case 'create_workflow': {
       try {
         const { name, nodeSequence } = intent.params;
-        const workflowId = store.createWorkflow(name || '新工作流');
+        const workflowId = await store.createWorkflow(name || '新工作流');
 
         // 如果指定了节点序列，自动添加节点和连线
         if (nodeSequence && nodeSequence.length > 0) {
@@ -61,7 +61,7 @@ export function executeAction(intent: ParsedIntent): ActionResult {
                 category: template.category,
                 defaultData: template.defaultData ? { ...template.defaultData } : undefined,
               };
-              store.updateWorkflow(workflowId, {
+              await store.updateWorkflow(workflowId, {
                 nodes: [...(useStore.getState().workflows.find((w: any) => w.id === workflowId)?.nodes || []), newNode],
               });
               createdNodes.push(newNodeId);

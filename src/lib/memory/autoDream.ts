@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Auto Dream — 跨会话记忆整合（tengu_onyx_plover）
  *
  * 参考：Claude Code Auto Dream 四阶段：

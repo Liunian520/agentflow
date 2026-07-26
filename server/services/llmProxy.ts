@@ -25,6 +25,8 @@ interface LLMChatRequest {
   maxTokens?: number;
   stream?: boolean;
   tools?: any[]; // Phase 6：MCP 工具 / function calling schema
+  sessionId?: string; // 会话 ID，用于记忆工具按会话隔离
+  taskId?: string; // 后台任务 ID，用于断线恢复
   // 以下是加密私钥相关的字段（复用现有加密体系）
   privateKeyEncrypted?: string;
   apiKeyEncrypted?: string;
@@ -543,8 +545,37 @@ async function callAnthropicRaw(apiKey: string, baseUrl: string, body: Record<st
 
 // ===== Agentic 工具循环（Phase 6：当 LLM 返回 tool_calls 时执行 MCP 工具并回灌） =====
 import { executeMcpToolByName } from './mcpService';
+import { executeNonMcpTool } from './builtinToolService';
 
 const MAX_TOOL_ROUNDS = 5;
+
+/** 统一工具执行：优先处理内置工具和记忆工具，降级到 MCP */
+async function executeTool(name: string, args: any, sessionId?: string): Promise<string> {
+  // 参数初始化：LLM 可能传入 null/undefined/非对象类型，确保后续操作安全
+  const safeName = typeof name === 'string' ? name : String(name || '');
+  const safeArgs = (args && typeof args === 'object' && !Array.isArray(args)) ? args : {};
+
+  try {
+    // 记忆工具：注入当前 sessionId（LLM 不感知此参数，由服务端自动填充）
+    if (safeName.startsWith('memory_') && !safeName.includes('__')) {
+      const argsWithSession = { ...safeArgs, sessionId: sessionId || safeArgs.sessionId || '' };
+      const nonMcpResult = await executeNonMcpTool(safeName, argsWithSession);
+      if (nonMcpResult !== null) return nonMcpResult;
+    }
+    // 先尝试非 MCP 工具（内置工具 + 记忆工具）
+    const nonMcpResult = await executeNonMcpTool(safeName, safeArgs);
+    if (nonMcpResult !== null) return nonMcpResult;
+    // 降级到 MCP 工具
+    return await executeMcpToolByName(safeName, safeArgs);
+  } catch (err: any) {
+    // 任何工具执行异常都不应中断整个 agentic loop
+    // 返回结构化错误 JSON，让 LLM 能看到失败原因并决定是否重试或换方案
+    return JSON.stringify({
+      success: false,
+      message: `工具 ${safeName} 执行异常: ${err?.message || String(err)}`,
+    });
+  }
+}
 
 async function runAgenticLoop(
   provider: string,
@@ -567,7 +598,7 @@ async function runAgenticLoop(
 
       messages.push({ role: 'assistant', content: json.content });
       for (const tu of toolUses) {
-        const result = await executeMcpToolByName(tu.name, tu.input || {});
+        const result = await executeTool(tu.name, tu.input || {});
         messages.push({
           role: 'user',
           content: [
@@ -599,7 +630,7 @@ async function runAgenticLoop(
         } catch {
           args = {};
         }
-        const result = await executeMcpToolByName(tc.function.name, args);
+        const result = await executeTool(tc.function.name, args);
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
@@ -610,7 +641,7 @@ async function runAgenticLoop(
     }
   }
 
-  return '[已达到最大工具调用轮次，停止以避免无限循环]';
+  return `[已达到最大工具调用轮次（${MAX_TOOL_ROUNDS} 轮），停止以避免无限循环。前面已完成的工具调用结果可见于历史，如需继续请重新提问]`;
 }
 
 // ===== 流式 Agentic 工具循环（Phase 7：带工具的 SSE 流式） =====
@@ -739,6 +770,7 @@ async function streamAgenticLoop(
   apiKey: string,
   initialBody: Record<string, any>,
   res: Response,
+  sessionId?: string,
 ): Promise<void> {
   let messages: any[] = [...initialBody.messages];
 
@@ -761,8 +793,8 @@ async function streamAgenticLoop(
       messages.push({ role: 'assistant', content: json.content });
       for (const tu of toolUses) {
         sendSSE(res, 'tool', { name: tu.name, status: 'running' });
-        const result = await executeMcpToolByName(tu.name, tu.input || {});
-        sendSSE(res, 'tool', { name: tu.name, status: 'done', result });
+        const result = await executeTool(tu.name, tu.input || {}, sessionId);
+        sendSSE(res, 'tool', { name: tu.name, status: 'done', result, args: tu.input || {} });
         messages.push({
           role: 'user',
           content: [{ type: 'tool_result', tool_use_id: tu.id, content: result }],
@@ -778,8 +810,9 @@ async function streamAgenticLoop(
       messages.push(outcome.assistantMsg);
       for (const tc of outcome.toolCalls) {
         sendSSE(res, 'tool', { name: tc.name, status: 'running' });
-        const result = await executeMcpToolByName(tc.name, safeParseArgs(tc.args));
-        sendSSE(res, 'tool', { name: tc.name, status: 'done', result });
+        const parsedArgs = safeParseArgs(tc.args);
+        const result = await executeTool(tc.name, parsedArgs);
+        sendSSE(res, 'tool', { name: tc.name, status: 'done', result, args: parsedArgs });
         messages.push({
           role: 'tool',
           tool_call_id: tc.id,
@@ -790,7 +823,7 @@ async function streamAgenticLoop(
     }
   }
 
-  sendSSE(res, 'done', { content: '[已达到最大工具调用轮次，停止以避免无限循环]' });
+  sendSSE(res, 'done', { content: `[已达到最大工具调用轮次（${MAX_TOOL_ROUNDS} 轮），停止以避免无限循环。前面已完成的工具调用结果可见于历史，如需继续请重新提问]` });
   res.end();
 }
 
@@ -974,7 +1007,7 @@ router.post('/test', async (req: Request, res: Response) => {
 
 // 非流式聊天
 router.post('/chat', async (req: Request, res: Response) => {
-  const { provider, baseUrl, apiKey, apiKeyEncrypted, model, messages, temperature, maxTokens, tools } = req.body as LLMChatRequest;
+  const { provider, baseUrl, apiKey, apiKeyEncrypted, model, messages, temperature, maxTokens, tools, sessionId } = req.body as LLMChatRequest;
 
   const resolvedApiKey = resolveApiKey(apiKey, apiKeyEncrypted);
 
@@ -990,7 +1023,7 @@ router.post('/chat', async (req: Request, res: Response) => {
     if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
     // Phase 6：配置了工具时走 Agentic 工具循环（LLM 可能返回 tool_calls）
     if (tools && tools.length > 0) {
-      const content = await runAgenticLoop(provider, baseUrl, resolvedApiKey, body);
+      const content = await runAgenticLoop(provider, baseUrl, resolvedApiKey, body, sessionId);
       res.json({
         success: true,
         content: content || '',
@@ -1034,7 +1067,7 @@ router.post('/chat', async (req: Request, res: Response) => {
 
 // SSE 流式聊天
 router.post('/chat/stream', async (req: Request, res: Response) => {
-  const { provider, baseUrl, apiKey, apiKeyEncrypted, model, messages, temperature, maxTokens, tools } = req.body as LLMChatRequest;
+  const { provider, baseUrl, apiKey, apiKeyEncrypted, model, messages, temperature, maxTokens, tools, sessionId } = req.body as LLMChatRequest;
 
   const resolvedApiKey = resolveApiKey(apiKey, apiKeyEncrypted);
   setupSSE(res);
@@ -1054,7 +1087,7 @@ router.post('/chat/stream', async (req: Request, res: Response) => {
     if (baseUrl) await assertSafeOutboundUrl(baseUrl, 'baseUrl');
     // Phase 7：配置了工具时走流式 Agentic 工具循环（逐轮流式 + 实时工具事件）
     if (tools && tools.length > 0) {
-      await streamAgenticLoop(provider, baseUrl, resolvedApiKey, body, res);
+      await streamAgenticLoop(provider, baseUrl, resolvedApiKey, body, res, sessionId);
       return;
     }
 

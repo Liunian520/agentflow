@@ -85,29 +85,8 @@ export function needsApproval(action: string, mode: string): ApprovalRequest | n
   // Plan 模式不执行任何操作，无需确认
   if (mode === 'plan') return null;
 
-  // Debug 模式自动执行，但高风险仍需确认
-  if (mode === 'debug' && action !== 'delete_agent' && action !== 'delete_workflow') return null;
-
-  // Code 模式：创建和运行需确认
-  const approvalMap: Record<string, ApprovalRequest> = {
-    create_agent: {
-      id: 'approval-create-agent',
-      action: '创建 Agent',
-      description: '将创建一个新的 Agent 并添加到系统中',
-      riskLevel: 'medium',
-    },
-    create_workflow: {
-      id: 'approval-create-workflow',
-      action: '创建工作流',
-      description: '将创建一个新的工作流，包含指定节点和连线',
-      riskLevel: 'medium',
-    },
-    run_workflow: {
-      id: 'approval-run-workflow',
-      action: '运行工作流',
-      description: '将启动工作流执行，可能消耗资源',
-      riskLevel: 'medium',
-    },
+  // 仅删除和 SSH 命令等高风险操作需要确认
+  const highRiskActions: Record<string, ApprovalRequest> = {
     delete_agent: {
       id: 'approval-delete-agent',
       action: '删除 Agent',
@@ -128,5 +107,5 @@ export function needsApproval(action: string, mode: string): ApprovalRequest | n
     },
   };
 
-  return approvalMap[action] || null;
+  return highRiskActions[action] || null;
 }

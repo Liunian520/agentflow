@@ -1,4 +1,4 @@
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001/api';
+﻿const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3001/api';
 const DEFAULT_TIMEOUT = 15000; // 15s
 const MAX_RETRIES = 2;
 

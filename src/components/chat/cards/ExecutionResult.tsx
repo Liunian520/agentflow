@@ -1,4 +1,4 @@
-import { CheckCircle, XCircle, Clock, Terminal } from 'lucide-react';
+﻿import { CheckCircle, XCircle, Clock, Terminal } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 
 interface ExecutionResultProps {

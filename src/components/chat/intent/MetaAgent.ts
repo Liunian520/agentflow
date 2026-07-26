@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Meta-Agent 编排器 — Skill-MAS 论文核心实现
  * 
  * 架构：双层路由
@@ -24,13 +24,16 @@ const META_AGENT_THRESHOLD = 0.7;
 
 // ===== 双层路由决策 =====
 export function shouldUseMetaAgent(intent: ParsedIntent): boolean {
+  // general_chat 永远走 handleLLMStream 流式对话（即便置信度低），
+  // 让 LLM 自行决定是否调用工具，避免低置信度闲聊被误派到 MetaAgent
+  if (intent.action === 'general_chat') return false;
+
   // 低置信度 → Meta-Agent
   if (intent.confidence < META_AGENT_THRESHOLD) return true;
 
   // 有追问提示（置信度不够明确，且非纯对话）→ Meta-Agent
-  if (intent.clarification && intent.action !== 'general_chat') return true;
+  if (intent.clarification) return true;
 
-  // general_chat 走 handleLLMStream 流式对话，不走 Meta-Agent
   // 其余高置信度意图走 IntentParser 快速层
   return false;
 }
@@ -75,7 +78,7 @@ Current system context:
 - Number of agents: ${store.agents.length}
 - Number of workflows: ${store.workflows.length}
 - Available models: ${channelInfo.models.map(m => m.displayName).join(', ')}
-- Available node types: start, end, llm, agent, code, http, condition, loop, variable, database, host, knowledge, template, human-in-loop, subworkflow, subagent, a2a
+- Available node types: start, end, llm, agent, code, http, condition, loop, variable, database, host, knowledge, template, human_in_loop, subworkflow, subagent, a2a
 - 当任务需要多个角色协作且可并行时，优先使用 subagent 节点（并行 Agent 团队），其 config 形如：{ "agents": [{"id":"sub-1","name":"研究员","model":"GPT-4o","systemPrompt":"...","tools":[]}], "aggregatorPrompt":"整合为最终交付物", "outputVariable":"subagent_result", "parallel": true }
 - 当任务需要调用外部 Agent（其他系统提供的 A2A Agent，跨平台互操作）时，使用 a2a 节点，其 config 形如：{ "agentUrl":"https://external-agent.example.com", "message":"请分析以下内容：{{input}}", "streaming":true, "outputVariable":"a2a_result" }
 
@@ -184,7 +187,7 @@ function normalizePlan(raw: any): OrchestrationPlan {
     const validNodeTypes: NodeType[] = [
       'start', 'end', 'llm', 'agent', 'code', 'http',
       'condition', 'loop', 'variable', 'database', 'host',
-      'knowledge', 'template', 'human-in-loop', 'subworkflow', 'subagent', 'a2a',
+      'knowledge', 'template', 'human_in_loop', 'subworkflow', 'subagent', 'a2a',
     ];
 
     workflow = {
@@ -272,15 +275,21 @@ function createFallbackPlan(reason: FallbackReason = 'none'): OrchestrationPlan 
 }
 
 // ===== 执行编排计划（将 PlannedAgent/PlannedWorkflow 落地到 Store） =====
-export async function executeOrchestrationPlan(plan: OrchestrationPlan): Promise<ActionResult[]> {
+export async function executeOrchestrationPlan(
+  plan: OrchestrationPlan,
+  onProgress?: (progress: { currentIndex: number; total: number; currentAction: string }) => void
+): Promise<ActionResult[]> {
   const { useStore } = await import('../../../store/useStore');
   const store = useStore.getState();
   const results: ActionResult[] = [];
+  const totalSteps = plan.agents.length + (plan.workflow ? 1 : 0);
+  let currentIndex = 0;
 
   // 1. 创建 PlannedAgent
   for (const plannedAgent of plan.agents) {
+    onProgress?.({ currentIndex, total: totalSteps, currentAction: `创建 Agent: ${plannedAgent.name}` });
     try {
-      store.createAgent({
+      await store.createAgent({
         name: plannedAgent.name,
         description: plannedAgent.description,
         model: plannedAgent.model,
@@ -291,11 +300,23 @@ export async function executeOrchestrationPlan(plan: OrchestrationPlan): Promise
       });
 
       const newAgent = useStore.getState().agents[useStore.getState().agents.length - 1];
+      // 自动注册到 Runtime Registry
+      const { getAgentRuntimeRegistry } = await import('../../../lib/agentRuntime');
+      const registry = getAgentRuntimeRegistry();
+      const capabilities = [...(plannedAgent.tools || [])];
+      if (plannedAgent.description) {
+        const desc = plannedAgent.description.toLowerCase();
+        if (desc.includes('代码') || desc.includes('code')) capabilities.push('code');
+        if (desc.includes('写') || desc.includes('write')) capabilities.push('writing');
+        if (desc.includes('分析') || desc.includes('analyze')) capabilities.push('reasoning');
+      }
+      registry.register(newAgent.id, capabilities);
       results.push({
         success: true,
         type: 'agent_created',
         data: { agentId: newAgent.id, agent: newAgent },
       });
+      currentIndex++;
     } catch (error: any) {
       results.push({
         success: false,
@@ -307,8 +328,9 @@ export async function executeOrchestrationPlan(plan: OrchestrationPlan): Promise
 
   // 2. 创建 PlannedWorkflow
   if (plan.workflow) {
+    onProgress?.({ currentIndex, total: totalSteps, currentAction: `创建工作流: ${plan.workflow.name}` });
     try {
-      const wfId = store.createWorkflow(plan.workflow.name);
+      const wfId = await store.createWorkflow(plan.workflow.name);
       const templates = store.nodeTemplates;
 
       const createdNodeIds: string[] = [];
@@ -332,7 +354,7 @@ export async function executeOrchestrationPlan(plan: OrchestrationPlan): Promise
             newNode.defaultData = { ...newNode.defaultData, ...plannedNode.config };
           }
 
-          store.updateWorkflow(wfId, {
+          await store.updateWorkflow(wfId, {
             nodes: [
               ...(useStore.getState().workflows.find((w: any) => w.id === wfId)?.nodes || []),
               newNode,
@@ -398,4 +420,84 @@ export async function executeOrchestrationPlan(plan: OrchestrationPlan): Promise
   }
 
   return results;
+}
+
+/**
+ * 自动编排检测：根据用户输入和当前系统状态，判断是否需要自动触发多 Agent 编排
+ *
+ * 触发条件（满足任一）：
+ * 1. 任务涉及多个不同领域（如"分析代码并写报告"）
+ * 2. 任务复杂度高（输入长度 > 200 字）
+ * 3. 已有 Agent 中没有匹配能力的（需要创建新 Agent）
+ * 4. 用户明确要求多角色协作
+ */
+export function shouldAutoOrchestrate(
+  userInput: string,
+  existingAgents: Array<{ capabilities: string[]; name: string }>,
+): { shouldOrchestrate: boolean; reason: string; requiredCapabilities: string[] } {
+  const input = userInput.toLowerCase();
+  const requiredCapabilities: string[] = [];
+
+  const domainKeywords: Record<string, string[]> = {
+    code: ['代码', '编程', 'bug', '函数', 'debug', 'code', '程序', '脚本', 'api'],
+    writing: ['写', '文案', '报告', '文章', '摘要', '翻译', 'write', 'draft'],
+    reasoning: ['分析', '推理', '诊断', '评估', '比较', 'analyze', 'reason'],
+    search: ['搜索', '查找', '调研', '检索', 'search', 'find', 'research'],
+    data: ['数据', '统计', '图表', '数据库', 'data', 'query', 'sql'],
+  };
+
+  for (const [cap, keywords] of Object.entries(domainKeywords)) {
+    if (keywords.some((kw) => input.includes(kw))) {
+      requiredCapabilities.push(cap);
+    }
+  }
+
+  if (requiredCapabilities.length >= 2) {
+    return {
+      shouldOrchestrate: true,
+      reason: `任务涉及 ${requiredCapabilities.length} 个领域：${requiredCapabilities.join(', ')}`,
+      requiredCapabilities,
+    };
+  }
+
+  // 长文本触发编排的前提是包含至少一个领域关键词，避免纯闲聊（如长篇吐槽）被误编排
+  if (userInput.length > 200 && requiredCapabilities.length > 0) {
+    return {
+      shouldOrchestrate: true,
+      reason: '任务描述较长且涉及具体领域，可能需要多步骤协作',
+      requiredCapabilities,
+    };
+  }
+
+  if (requiredCapabilities.length === 1) {
+    // 仅当已有 agent 且都缺该能力时才编排；全新项目（无任何 agent）时
+    // 让用户走 IntentParser 快速层直接创建，避免过度编排阻断首次引导卡片
+    if (existingAgents.length > 0) {
+      const hasCapableAgent = existingAgents.some((a) =>
+        requiredCapabilities.every((cap) => a.capabilities.includes(cap)),
+      );
+      if (!hasCapableAgent) {
+        return {
+          shouldOrchestrate: true,
+          reason: `没有具备 ${requiredCapabilities.join(', ')} 能力的 Agent，需要创建`,
+          requiredCapabilities,
+        };
+      }
+    }
+  }
+
+  const collabKeywords = ['多个agent', '多agent', '协作', '并行', '团队', '分工', '协同'];
+  if (collabKeywords.some((kw) => input.includes(kw))) {
+    return {
+      shouldOrchestrate: true,
+      reason: '用户要求多角色协作',
+      requiredCapabilities,
+    };
+  }
+
+  return {
+    shouldOrchestrate: false,
+    reason: '',
+    requiredCapabilities,
+  };
 }

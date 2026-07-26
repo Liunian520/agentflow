@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Memory Architecture — 统一类型引用入口
  *
  * 所有记忆架构相关类型均定义在 src/types/index.ts，

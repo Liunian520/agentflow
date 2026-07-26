@@ -1,5 +1,5 @@
-/**
- * AgentFlow 意图解析引擎 — 前端预解析层
+﻿/**
+ * LNAgent 意图解析引擎 — 前端预解析层
  * 基于关键词匹配的快速意图识别，将自然语言翻译为结构化操作指令
  */
 
@@ -73,16 +73,16 @@ const nodeKeywords: Record<string, { type: string; label: string }> = {
   '远程': { type: 'host', label: '远程主机' },
   '知识': { type: 'knowledge', label: '知识库' },
   '模板': { type: 'template', label: '模板' },
-  '人工': { type: 'human-in-loop', label: '人工审核' },
-  '审核': { type: 'human-in-loop', label: '人工审核' },
+  '人工': { type: 'human_in_loop', label: '人工审核' },
+  '审核': { type: 'human_in_loop', label: '人工审核' },
   '子流程': { type: 'subworkflow', label: '子流程' },
 };
 
 // 意图匹配模式
 const intentPatterns: IntentPattern[] = [
-  // 创建 Agent
+  // 创建 Agent（必须有创建动词 + Agent 相关关键词）
   {
-    pattern: /创建|新建|添加|建.*agent|助手|智能体/i,
+    pattern: /(创建|新建|添加|做一个|建一个).*(agent|智能体|助手)/i,
     action: 'create_agent',
     minConfidence: 0.8,
     extractParams: (text) => {
@@ -103,9 +103,9 @@ const intentPatterns: IntentPattern[] = [
     },
   },
 
-  // 创建工作流
+  // 创建工作流（必须有创建动词 + 工作流相关关键词）
   {
-    pattern: /创建|新建|设计|编排.*工作流|流程|pipeline|workflow/i,
+    pattern: /(创建|新建|设计一个|编排|做一个).*(工作流|流程|pipeline|workflow)/i,
     action: 'create_workflow',
     minConfidence: 0.8,
     extractParams: (text) => {
@@ -122,7 +122,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 运行工作流
   {
-    pattern: /运行|执行|跑|启动.*工作流|workflow/i,
+    pattern: /(运行|执行|跑|启动).*(工作流|workflow)/i,
     action: 'run_workflow',
     minConfidence: 0.75,
     extractParams: (text) => ({
@@ -132,7 +132,7 @@ const intentPatterns: IntentPattern[] = [
 
   // SSH 命令
   {
-    pattern: /ssh|远程|连接.*主机|在.*上执行|运维|命令/i,
+    pattern: /(ssh|远程|连接).*(主机|服务器)|(在|上).*(执行|运行).*(命令|运维)/i,
     action: 'ssh_command',
     minConfidence: 0.7,
     extractParams: (text) => ({
@@ -143,7 +143,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 列出 Agent
   {
-    pattern: /列出|查看|有哪些|显示.*agent|助手列表/i,
+    pattern: /(列出|查看|有哪些|显示).*(agent|助手)/i,
     action: 'list_agents',
     minConfidence: 0.85,
     extractParams: () => ({}),
@@ -151,7 +151,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 列出工作流
   {
-    pattern: /列出|查看|有哪些|显示.*工作流|流程列表/i,
+    pattern: /(列出|查看|有哪些|显示).*(工作流|流程)/i,
     action: 'list_workflows',
     minConfidence: 0.85,
     extractParams: () => ({}),
@@ -159,7 +159,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 查询状态
   {
-    pattern: /状态|运行情况|进度|怎么样/i,
+    pattern: /(状态|运行情况|进度|怎么样)/i,
     action: 'query_status',
     minConfidence: 0.6,
     extractParams: (text) => ({
@@ -169,7 +169,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 修改 Agent
   {
-    pattern: /修改|更新|编辑|调整.*agent|助手.*设置/i,
+    pattern: /(修改|更新|编辑|调整).*(agent|助手)/i,
     action: 'update_agent',
     minConfidence: 0.75,
     extractParams: (text) => ({
@@ -180,7 +180,7 @@ const intentPatterns: IntentPattern[] = [
 
   // 修改工作流
   {
-    pattern: /修改|更新|编辑|调整.*工作流|加.*节点/i,
+    pattern: /(修改|更新|编辑|调整).*(工作流|流程)|(加|添加).*(节点)/i,
     action: 'update_workflow',
     minConfidence: 0.75,
     extractParams: (text) => ({

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+﻿import { useState, useMemo } from 'react';
 import {
   Search,
   Play,
@@ -310,7 +310,7 @@ const nodeTemplates: NodeTemplate[] = [
       iconName: 'FileText',
       type: 'template',
       templateConfig: {
-        template: '你好，{{name}}！欢迎使用 AgentFlow。',
+        template: '你好，{{name}}！欢迎使用 LNAgent。',
         templateType: 'string',
         outputVariable: 'templateResult',
       },
@@ -473,8 +473,8 @@ const nodeTemplates: NodeTemplate[] = [
     },
   },
   {
-    id: 'human-in-loop',
-    type: 'human-in-loop',
+    id: 'human_in_loop',
+    type: 'human_in_loop',
     name: '人工审核',
     description: '暂停等待人工确认后继续',
     icon: UserCheck,
@@ -484,7 +484,7 @@ const nodeTemplates: NodeTemplate[] = [
       label: '人工审核',
       description: '暂停等待人工确认后继续',
       iconName: 'UserCheck',
-      type: 'human-in-loop',
+      type: 'human_in_loop',
       humanConfig: {
         title: '需要人工审核',
         description: '请确认以下内容是否正确',

@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+﻿import { useState, useEffect, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LogIn, User, Lock, Eye, EyeOff, Loader2, Sparkles, ShieldCheck } from 'lucide-react';
 import { useStore } from '../store/useStore';
@@ -63,10 +63,10 @@ export function LoginPage() {
             <Sparkles className="w-7 h-7 text-white" />
           </div>
           <h1 className="mt-4 text-2xl font-semibold text-text-primary tracking-tight">
-            AgentFlow
+            LNAgent
           </h1>
           <p className="mt-1 text-sm text-text-secondary">
-            {isFirstTime ? '首次使用，请设置管理员账号' : '登录以继续到你的工作台'}
+            {isFirstTime ? '首次使用，请设置管理员账号' : '随时随地，你的个人 Agent 工作台'}
           </p>
         </div>
 
@@ -165,7 +165,7 @@ export function LoginPage() {
 
         {/* 版权信息 */}
         <p className="mt-8 text-center text-xs text-text-tertiary">
-          © 2024 AgentFlow
+          © 2025 LNAgent
         </p>
       </div>
     </div>

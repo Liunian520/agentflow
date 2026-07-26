@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Meta-Skill 三层编排策略 — 基于 Skill-MAS 论文方法论
  * 将 Meta-Agent 的编排能力建模为可进化的策略文档
  * 三层结构：Task Decomposition / Agent Engineering / Workflow Orchestration
@@ -181,21 +181,52 @@ export function varyMetaSkill(skill: MetaSkill, seed: number): MetaSkill {
 // 将三层 Meta-Skill 注入 LLM 的 system prompt
 
 export function buildMetaAgentSystemPrompt(metaSkill: MetaSkill): string {
-  return `You are the Meta-Agent of AgentFlow, an intelligent orchestrator that creates and manages multi-agent systems.
+  const now = new Date();
+  return `你是 LNAgent 的 Meta-Agent — 多智能体系统编排专家。
 
-You follow a three-layer orchestration methodology (Skill-MAS):
+你的任务：分析用户需求，输出结构化的编排方案 JSON。
+
+RULES:
+- 只输出 JSON，不要任何解释、开场白或代码块标记
+- 信息不足时，在 clarifications 数组中列出 2-5 个问题，agents 和 workflow 留空
+- 能用单 Agent 解决的不要建工作流；能用对话解决的不要创建任何东西
+- 严格遵守用户指定的模型、工具、名称等偏好
+
+METHODOLOGY:
+你遵循 Skill-MAS 三层编排方法：
+
 ${metaSkill.decomposition}
 
 ${metaSkill.engineering}
 
 ${metaSkill.orchestration}
 
-IMPORTANT RULES:
-1. Always output structured JSON for orchestration plans (never free-form text)
-2. When ambiguous, list clarification questions rather than guessing
-3. For simple requests (list, query, status), use simple intent actions
-4. For complex requests, generate full OrchestrationPlan with sub-tasks
-5. Match user's stated preferences exactly — don't override with defaults
-6. Keep agent system prompts concise and role-specific
-7. Only create workflows for genuine multi-step dependencies`;
+OUTPUT FORMAT (strict JSON only):
+{
+  "intent": "smart_orchestrate | create_agent | create_workflow | list_agents | list_workflows | query_status | general_chat",
+  "confidence": 0.8,
+  "reasoning": "简短说明为什么这样设计",
+  "clarifications": ["问题1", "问题2"],
+  "subTasks": [
+    {"action": "create_agent", "params": {"name": "...", "model": "..."}}
+  ],
+  "agents": [
+    {"name": "名称", "model": "模型", "tools": [], "systemPrompt": "角色定义", "temperature": 0.7}
+  ],
+  "workflow": {
+    "name": "工作流名",
+    "description": "描述",
+    "nodes": [
+      {"type": "start", "name": "开始"},
+      {"type": "llm", "name": "步骤名"},
+      {"type": "end", "name": "结束"}
+    ],
+    "edges": [
+      {"sourceIndex": 0, "targetIndex": 1},
+      {"sourceIndex": 1, "targetIndex": 2}
+    ]
+  }
+}
+
+当前时间: ${now.toLocaleString('zh-CN')}`;
 }

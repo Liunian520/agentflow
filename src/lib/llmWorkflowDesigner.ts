@@ -1,4 +1,4 @@
-/**
+﻿/**
  * LLM 工作流设计器 — 用自然语言对话创建工作流
  *
  * 核心思路：
@@ -32,13 +32,13 @@ const NODE_TYPE_DESCRIPTION: Record<NodeType, { name: string; desc: string; icon
   condition:   { name: '条件分支',   desc: '根据条件走不同分支路径',                        icon: 'GitBranch', color: '#8b5cf6', category: '流程控制' },
   loop:        { name: '循环',       desc: '循环处理数据（固定次数/条件循环）',             icon: 'RefreshCw', color: '#ec4899', category: '流程控制' },
   subworkflow: { name: '子工作流',   desc: '调用另一个工作流作为子流程',                    icon: 'Layers',    color: '#6366f1', category: '流程控制' },
-  'human-in-loop': { name: '人工审核', desc: '需要人工介入审核/确认',                      icon: 'User',      color: '#f43f5e', category: '交互与部署' },
+  'human_in_loop': { name: '人工审核', desc: '需要人工介入审核/确认',                      icon: 'User',      color: '#f43f5e', category: '交互与部署' },
   host:        { name: '远程主机',   desc: '在远程主机执行命令（SSH）',                     icon: 'Server',    color: '#6b7280', category: '交互与部署' },
 };
 
 // ===== 系统提示词 =====
 
-const SYSTEM_PROMPT = `你是 AgentFlow 工作流设计器。根据用户的自然语言描述，设计工作流的节点和连线结构。
+const SYSTEM_PROMPT = `你是 LNAgent 工作流设计器。根据用户的自然语言描述，设计工作流的节点和连线结构。
 
 ## 可用节点类型
 ${Object.entries(NODE_TYPE_DESCRIPTION)
@@ -77,7 +77,7 @@ ${Object.entries(NODE_TYPE_DESCRIPTION)
     { "id": "node-start1", "type": "start", "name": "接收文本", "description": "接收待审核文本" },
     { "id": "node-llm1", "type": "llm", "name": "AI合规判断", "description": "用大模型判断文本是否合规" },
     { "id": "node-cond1", "type": "condition", "name": "合规判断", "description": "根据AI判断结果分支" },
-    { "id": "node-human1", "type": "human-in-loop", "name": "人工复审", "description": "对不合规内容进行人工审核" },
+    { "id": "node-human1", "type": "human_in_loop", "name": "人工复审", "description": "对不合规内容进行人工审核" },
     { "id": "node-llm2", "type": "llm", "name": "生成审核报告", "description": "汇总审核结果生成报告" },
     { "id": "node-end1", "type": "end", "name": "输出结果", "description": "输出审核结果" }
   ],
@@ -92,7 +92,7 @@ ${Object.entries(NODE_TYPE_DESCRIPTION)
 }`;
 
 // 增量修改的系统提示词
-const MODIFY_SYSTEM_PROMPT = `你是 AgentFlow 工作流修改器。用户希望对已有工作流进行修改。
+const MODIFY_SYSTEM_PROMPT = `你是 LNAgent 工作流修改器。用户希望对已有工作流进行修改。
 
 ## 当前工作流结构
 {{CURRENT_WORKFLOW}}
@@ -459,8 +459,8 @@ function fallbackDesign(
 ): WorkflowDesignResult {
   // 简单的关键词→节点映射
   const keywordNodeMap: Record<string, NodeType> = {
-    'ai': 'llm', '大模型': 'llm', 'llm': 'llm', '判断': 'condition', '审核': 'human-in-loop',
-    '人工': 'human-in-loop', '分支': 'condition', '条件': 'condition', '循环': 'loop',
+    'ai': 'llm', '大模型': 'llm', 'llm': 'llm', '判断': 'condition', '审核': 'human_in_loop',
+    '人工': 'human_in_loop', '分支': 'condition', '条件': 'condition', '循环': 'loop',
     'http': 'http', '请求': 'http', '数据库': 'database', 'sql': 'database',
     '知识库': 'knowledge', '代码': 'code', '执行': 'code', 'agent': 'agent', '智能体': 'agent',
   };

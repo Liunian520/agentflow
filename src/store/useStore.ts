@@ -1,13 +1,21 @@
-import { create } from 'zustand';
+﻿import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog, MetaSkill, ExecutionTrace, SubAgentDef, MCPServer, MCPTool, RouterRecord, SessionMemory, FactualMemory, ExperientialReflection, DreamLog, MemoryAuditEntry, HandoffSummary } from '../types';
-import { mockWorkflows, mockAgents, mockPlugins, mockTemplates, mockMessages, nodeTemplates, mockHosts } from '../data/mockData';
+import type { Workflow, Agent, ChatMessage, Plugin, Template, WorkflowNode, WorkflowEdge, NodeData, ToolConfig, User, Channel, RemoteHost, ExecutionState, ExecutionLog, MetaSkill, ExecutionTrace, SubAgentDef, MCPServer, MCPTool, RouterRecord, SessionMemory, FactualMemory, ExperientialReflection, DreamLog, MemoryAuditEntry, HandoffSummary, FlowNode, FlowEdge, NodeExecutionStatus } from '../types';
+import { mockPlugins, mockTemplates, nodeTemplates } from '../data/mockData';
 import { generateId } from '../lib/utils';
 import { sshApi } from '../api/sshApi';
 import { hashPassword, verifyPassword } from '../lib/passwordUtils';
 import { getChannelForModel, getAvailableChannelFromStore, routedChatLLM, sendA2ATask, streamA2ATask } from '../api/llmApi';
 import { INITIAL_META_SKILL } from '../lib/metaSkill';
 import { extractTaskFeatures } from '../lib/modelRouter';
+import { BUILTIN_TOOL_SCHEMAS } from '../lib/builtinTools';
+import { MEMORY_TOOL_SCHEMAS } from '../lib/memory/selfEditing';
+import { workflowApi } from '../api/workflowApi';
+import { agentApi } from '../api/agentApi';
+import { channelApi } from '../api/channelApi';
+import { getAgentRuntimeRegistry } from '../lib/agentRuntime';
+import { getAgentMessageBus } from '../lib/agentMessageBus';
+import { getAgentScheduler } from '../lib/agentScheduler';
 
 // ===== 工作流执行辅助：表达式求值 / 模板替换 / 值转换 =====
 
@@ -111,18 +119,20 @@ interface AppState {
 
   // Channels
   channels: Channel[];
-  addChannel: (channel: Omit<Channel, 'id' | 'createdAt'>) => void;
-  updateChannel: (id: string, updates: Partial<Channel>) => void;
-  deleteChannel: (id: string) => void;
+  addChannel: (channel: Omit<Channel, 'id' | 'createdAt'>) => Promise<void>;
+  updateChannel: (id: string, updates: Partial<Channel>) => Promise<void>;
+  deleteChannel: (id: string) => Promise<void>;
   toggleChannelEnabled: (id: string) => void;
   getAvailableModels: () => { channelId: string; channelName: string; provider: string; model: { name: string; displayName: string } }[];
 
   // 模型路由与选择
   defaultModelId: string | null;     // 手动指定默认模型（格式: channelId:modelName），null = ACRouter 自动路由
   routerEnabled: boolean;            // ACRouter 自动路由开关，false = 使用 defaultModelId
+  visionModelId: string | null;      // 识图模型（格式: channelId:modelName），当对话含图片且当前模型不支持视觉时自动切换
   theme: 'light' | 'dark' | 'system';// 界面主题
   setDefaultModelId: (id: string | null) => void;
   setRouterEnabled: (enabled: boolean) => void;
+  setVisionModelId: (id: string | null) => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
 
   // Remote Hosts
@@ -141,9 +151,13 @@ interface AppState {
   pauseExecution: () => void;
   resumeExecution: () => void;
   stopExecution: () => void;
-  stepExecution: () => void;
+  stepExecution: () => Promise<void>;
   addExecutionLog: (log: Omit<ExecutionLog, 'id' | 'timestamp'>) => void;
   setExecutionVariable: (name: string, value: any) => void;
+
+  executionVariables: Record<string, any>;
+  setExecutionVariables: (variables: Record<string, any>) => void;
+  clearExecutionVariables: () => void;
 
   workflows: Workflow[];
   agents: Agent[];
@@ -161,14 +175,14 @@ interface AppState {
   setCurrentAgent: (id: string | null) => void;
   toggleSidebar: () => void;
   setSelectedNode: (id: string | null) => void;
-  addMessage: (message: ChatMessage) => void;
+  addMessage: (message: ChatMessage) => Promise<void>;
   updateMessage: (id: string, updates: Partial<ChatMessage>) => void;
   togglePlugin: (id: string) => void;
   addNodeFromTemplate: (template: WorkflowNode & { defaultData?: Partial<NodeData> }) => void;
-  createWorkflow: (name: string, templateId?: string) => string;
-  deleteWorkflow: (id: string) => void;
-  duplicateWorkflow: (id: string) => string | null;
-  updateWorkflow: (id: string, updates: Partial<Workflow>) => void;
+  createWorkflow: (name: string, templateId?: string) => Promise<string>;
+  deleteWorkflow: (id: string) => Promise<void>;
+  duplicateWorkflow: (id: string) => Promise<string | null>;
+  updateWorkflow: (id: string, updates: Partial<Workflow>) => Promise<void>;
   updateWorkflowNode: (workflowId: string, nodeId: string, updates: Partial<NodeData>) => void;
   duplicateWorkflowNode: (workflowId: string, nodeId: string) => void;
   removeWorkflowNode: (workflowId: string, nodeId: string) => void;
@@ -186,9 +200,37 @@ interface AppState {
   startRun: () => void;
   stopRun: () => void;
 
-  createAgent: (agent: Omit<Agent, 'id' | 'createdAt'>) => void;
-  updateAgent: (id: string, updates: Partial<Agent>) => void;
-  deleteAgent: (id: string) => void;
+  // ===== Workflow Editor (React Flow) =====
+  workflowEditorNodes: FlowNode[];
+  workflowEditorEdges: FlowEdge[];
+  workflowEditorSelectedNodeId: string | null;
+  workflowEditorSelectedEdgeId: string | null;
+  workflowEditorPast: Array<{ nodes: FlowNode[]; edges: FlowEdge[] }>;
+  workflowEditorFuture: Array<{ nodes: FlowNode[]; edges: FlowEdge[] }>;
+  addWorkflowEditorNode: (node: Omit<FlowNode, 'id'> & { id?: string }) => void;
+  updateWorkflowEditorNode: (id: string, updates: Partial<FlowNode>) => void;
+  deleteWorkflowEditorNode: (id: string) => void;
+  addWorkflowEditorEdge: (edge: Omit<FlowEdge, 'id'> & { id?: string }) => void;
+  updateWorkflowEditorEdge: (id: string, updates: Partial<FlowEdge>) => void;
+  deleteWorkflowEditorEdge: (id: string) => void;
+  undoWorkflowEditor: () => void;
+  redoWorkflowEditor: () => void;
+  setWorkflowEditorSelectedNode: (id: string | null) => void;
+  setWorkflowEditorSelectedEdge: (id: string | null) => void;
+  loadWorkflowToEditor: (workflowId: string) => void;
+  clearWorkflowEditor: () => void;
+
+  // ===== 工作流调试器 =====
+  breakpoints: string[];
+  nodeExecutionStatuses: Record<string, NodeExecutionStatus>;
+  toggleBreakpoint: (nodeId: string) => void;
+  clearBreakpoints: () => void;
+  setNodeExecutionStatus: (nodeId: string, status: NodeExecutionStatus) => void;
+  clearNodeExecutionStatuses: () => void;
+
+  createAgent: (agent: Omit<Agent, 'id' | 'createdAt'>) => Promise<void>;
+  updateAgent: (id: string, updates: Partial<Agent>) => Promise<void>;
+  deleteAgent: (id: string) => Promise<void>;
 
   // Meta-Skill (Skill-MAS)
   metaSkill: MetaSkill;
@@ -253,26 +295,132 @@ interface AppState {
 }
 
 // ===== 工具解析辅助（Phase 6：将 MCP 工具标识解析为 OpenAI function 调用 schema） =====
+// 解析工具 ID 为 OpenAI function schema，支持三类工具：
+//   - 内置工具：builtin_xxx（来自 BUILTIN_TOOL_SCHEMAS）
+//   - 记忆工具：memory_xxx（来自 MEMORY_TOOL_SCHEMAS）
+//   - MCP 工具：serverName__toolName 或原始 toolName（来自已连接的 MCP server）
 function resolveToolSchemas(toolIds?: string[]): any[] {
   if (!toolIds || toolIds.length === 0) return [];
+  const result: any[] = [];
+
+  // 1. 内置工具
+  const builtinNames = new Set<string>();
+  for (const id of toolIds) {
+    if (id.startsWith('builtin_')) {
+      builtinNames.add(id);
+    }
+  }
+  if (builtinNames.size > 0) {
+    for (const schema of BUILTIN_TOOL_SCHEMAS as any[]) {
+      if (builtinNames.has(schema.function.name)) {
+        result.push(schema);
+      }
+    }
+  }
+
+  // 2. 记忆工具
+  const memoryNames = new Set<string>();
+  for (const id of toolIds) {
+    if (id.startsWith('memory_') && !id.includes('__')) {
+      memoryNames.add(id);
+    }
+  }
+  if (memoryNames.size > 0) {
+    for (const schema of MEMORY_TOOL_SCHEMAS as any[]) {
+      if (memoryNames.has(schema.name)) {
+        result.push({ type: 'function', function: schema });
+      }
+    }
+  }
+
+  // 3. MCP 工具（含命名空间格式和原始名）
   const mcps = useStore.getState().mcps || [];
-  const allTools = mcps.flatMap((m) => (m.enabled ? m.tools : []));
-  const selected = allTools.filter((t) => toolIds.includes(t.name));
-  return selected.map((t) => ({
-    type: 'function',
-    function: {
-      name: t.name,
-      description: t.description,
-      parameters:
-        t.inputSchema && typeof t.inputSchema === 'object'
-          ? t.inputSchema
-          : { type: 'object', properties: {} },
-    },
-  }));
+  const allMcpTools = mcps.flatMap((m) => (m.enabled ? m.tools : []));
+  const mcpToolIds = new Set(toolIds.filter((id) => !id.startsWith('builtin_') && !(id.startsWith('memory_') && !id.includes('__'))));
+  for (const id of mcpToolIds) {
+    const sepIdx = id.indexOf('__');
+    let serverHint = '';
+    let toolName = id;
+    if (sepIdx > 0) {
+      serverHint = id.slice(0, sepIdx);
+      toolName = id.slice(sepIdx + 2);
+    }
+    const matched = allMcpTools.find((t) => {
+      if (sepIdx > 0) {
+        const ownerMcp = mcps.find((m) => m.enabled && m.name === serverHint && m.tools.includes(t));
+        return ownerMcp && t.name === toolName;
+      }
+      return t.name === toolName;
+    });
+    if (matched) {
+      result.push({
+        type: 'function',
+        function: {
+          name: id,
+          description: matched.description,
+          parameters:
+            matched.inputSchema && typeof matched.inputSchema === 'object'
+              ? matched.inputSchema
+              : { type: 'object', properties: {} },
+        },
+      });
+    }
+  }
+
+  return result;
 }
 
-const USER_STORAGE_KEY = 'agentflow_user';
-const ADMIN_STORAGE_KEY = 'agentflow_admin';
+const USER_STORAGE_KEY = 'lnagent_user';
+const ADMIN_STORAGE_KEY = 'lnagent_admin';
+
+// ===== 工作流云端同步（Debounced）=====
+// 节点/边/工具等结构变更只改本地 state，需要 debounced 同步到后端
+// 确保同一账号在不同设备上看到相同的工作流结构
+const pendingWorkflowSyncs = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleWorkflowSync(workflowId: string) {
+  // 清除之前的定时器
+  const existing = pendingWorkflowSyncs.get(workflowId);
+  if (existing) clearTimeout(existing);
+
+  // 500ms debounce，避免频繁 API 调用
+  const timer = setTimeout(async () => {
+    pendingWorkflowSyncs.delete(workflowId);
+    try {
+      const state = useStore.getState();
+      const wf = state.workflows.find((w) => w.id === workflowId);
+      if (!wf) return;
+      await workflowApi.update(workflowId, wf);
+      console.debug(`[WorkflowSync] ${wf.name} 已同步到云端`);
+    } catch (err) {
+      // 后端异常：静默保留本地数据，下次启动时 useDataInit 会尝试恢复
+      console.warn(`[WorkflowSync] 工作流 ${workflowId} 同步失败，本地数据已保留:`, err);
+    }
+  }, 500);
+
+  pendingWorkflowSyncs.set(workflowId, timer);
+}
+
+function scheduleWorkflowSyncAll() {
+  const state = useStore.getState();
+  state.workflows.forEach((w) => scheduleWorkflowSync(w.id));
+}
+
+/** 立即同步所有待同步的工作流（登出/页面关闭前调用） */
+function flushPendingWorkflowSyncs() {
+  pendingWorkflowSyncs.forEach((timer, workflowId) => {
+    clearTimeout(timer);
+    pendingWorkflowSyncs.delete(workflowId);
+  });
+  const state = useStore.getState();
+  state.workflows.forEach(async (w) => {
+    try {
+      await workflowApi.update(w.id, w);
+    } catch {
+      // 静默失败
+    }
+  });
+}
 
 /** 从 localStorage 加载当前登录用户 */
 const loadUserFromStorage = (): User | null => {
@@ -369,31 +517,49 @@ export const useStore = create<AppState>()(
     return false;
   },
   logout: () => {
+    // 登出前先同步所有待同步的工作流
+    flushPendingWorkflowSyncs();
     set({ currentUser: null });
     saveUserToStorage(null);
   },
 
   // Channels
   channels: [],
-  addChannel: (channel) =>
-    set((state) => ({
-      channels: [
-        ...state.channels,
-        {
-          ...channel,
-          id: `ch-${generateId()}`,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    })),
-  updateChannel: (id, updates) =>
-    set((state) => ({
-      channels: state.channels.map((c) => (c.id === id ? { ...c, ...updates } : c)),
-    })),
-  deleteChannel: (id) =>
+  addChannel: async (channel) => {
+    const localChannel = { ...channel, id: `ch-${generateId()}`, createdAt: new Date().toISOString() };
+    try {
+      const created = await channelApi.create(channel);
+      set((state) => ({ channels: [...state.channels, created] }));
+    } catch (err) {
+      // 后端异常：降级为本地保存，确保用户仍能使用
+      console.warn('[addChannel] 后端同步失败，降级为本地保存:', err);
+      set((state) => ({ channels: [...state.channels, localChannel] }));
+    }
+  },
+  updateChannel: async (id, updates) => {
+    const updated = { ...updates } as Channel;
+    try {
+      const remoteUpdated = await channelApi.update(id, updates);
+      set((state) => ({
+        channels: state.channels.map((c) => (c.id === id ? remoteUpdated : c)),
+      }));
+    } catch (err) {
+      console.warn('[updateChannel] 后端同步失败，降级为本地更新:', err);
+      set((state) => ({
+        channels: state.channels.map((c) => (c.id === id ? { ...c, ...updated } : c)),
+      }));
+    }
+  },
+  deleteChannel: async (id) => {
+    try {
+      await channelApi.delete(id);
+    } catch (err) {
+      console.warn('[deleteChannel] 后端同步失败，仅本地删除:', err);
+    }
     set((state) => ({
       channels: state.channels.filter((c) => c.id !== id),
-    })),
+    }));
+  },
   toggleChannelEnabled: (id) =>
     set((state) => ({
       channels: state.channels.map((c) =>
@@ -414,9 +580,11 @@ export const useStore = create<AppState>()(
   // 模型路由与选择
   defaultModelId: null,
   routerEnabled: true,
+  visionModelId: null,
   theme: 'light',
   setDefaultModelId: (id) => set({ defaultModelId: id }),
   setRouterEnabled: (enabled) => set({ routerEnabled: enabled }),
+  setVisionModelId: (id) => set({ visionModelId: id }),
   setTheme: (theme) => {
     set({ theme });
     // 立即应用到 DOM（切换 <html> 上的 .dark 类）
@@ -424,7 +592,7 @@ export const useStore = create<AppState>()(
   },
 
   // Remote Hosts
-  hosts: mockHosts,
+  hosts: [],
   addHost: (host) =>
     set((state) => ({
       hosts: [
@@ -567,7 +735,7 @@ export const useStore = create<AppState>()(
     setTimeout(() => {
       const currentState = get();
       if (!currentState.executionState.isRunning) return;
-      get().stepExecution();
+      get().stepExecution().catch((err) => { console.error('stepExecution error:', err); });
     }, 800);
   },
   pauseExecution: () =>
@@ -587,7 +755,7 @@ export const useStore = create<AppState>()(
       },
     }));
     setTimeout(() => {
-      get().stepExecution();
+      get().stepExecution().catch((err) => { console.error('stepExecution error:', err); });
     }, 500);
   },
   stopExecution: () =>
@@ -601,6 +769,8 @@ export const useStore = create<AppState>()(
       },
     })),
   stepExecution: async () => {
+    let currentNode: WorkflowNode | undefined;
+    try {
     const state = get();
     const { executionState, currentWorkflowId, workflows } = state;
     if (!executionState.isRunning || !currentWorkflowId) return;
@@ -635,7 +805,7 @@ export const useStore = create<AppState>()(
     const workflow = workflows.find((w) => w.id === currentWorkflowId);
     if (!workflow) return;
 
-    const currentNode = workflow.nodes.find((n) => n.id === executionState.currentNodeId);
+    currentNode = workflow.nodes.find((n) => n.id === executionState.currentNodeId);
     if (!currentNode) {
       set((s) => ({
         executionState: {
@@ -710,9 +880,7 @@ export const useStore = create<AppState>()(
             }
             // 用变量替换 userPrompt 中的 {{变量名}} 模板
             let userContent = config?.userPrompt || '';
-            for (const [varName, varVal] of Object.entries(newVariables)) {
-              userContent = userContent.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
-            }
+            userContent = substituteTemplate(userContent, newVariables);
             if (!userContent) {
               userContent = '请根据上下文继续处理任务';
             }
@@ -766,11 +934,18 @@ export const useStore = create<AppState>()(
 
         const outputVar = config?.outputVariable || 'llm_output';
         newVariables[outputVar] = llmResult;
+        if (llmResult.startsWith('[调用失败]') || llmResult.startsWith('[异常]')) {
+          newVariables[`${outputVar}__error`] = true;
+        }
         break;
       }
 
       case 'agent': {
         const config = currentNode.defaultData?.agentConfig;
+        const startTime = Date.now();
+        const scheduler = getAgentScheduler();
+        const registry = getAgentRuntimeRegistry();
+        const agentId = (currentNode.defaultData as any)?.agentId || '';
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
@@ -782,6 +957,54 @@ export const useStore = create<AppState>()(
 
         // 真实 LLM 调用 — Agent 节点本质上是带 system prompt 的 LLM 调用
         try {
+          // 动态调度：如果该 Agent 正忙，将任务加入队列
+          const agentState = registry.getAgentState(agentId);
+          if (agentState && agentState.status === 'busy') {
+            const inputText = Object.entries(newVariables)
+              .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+              .join('\n');
+            const taskId = scheduler.enqueue({
+              input: inputText,
+              requiredCapabilities: agentState.capabilities,
+              preferredModel: null,
+              priority: 'normal',
+            });
+
+            // 等待任务完成（轮询，最多 60 秒）
+            const waitStart = Date.now();
+            while (Date.now() - waitStart < 60000) {
+              const task = scheduler.getTask(taskId);
+              if (task && (task.status === 'done' || task.status === 'failed')) {
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 500));
+            }
+
+            const task = scheduler.getTask(taskId);
+            if (task?.status === 'done' && task.result) {
+              newVariables['agent_result'] = {
+                status: 'completed',
+                output: task.result,
+              };
+              break;
+            } else {
+              // 队列任务失败或超时，不 fall-through 到直接 LLM 调用
+              newVariables['agent_result'] = {
+                status: 'failed',
+                output: `队列任务${task?.status === 'failed' ? '失败' : '超时'}: ${task?.result || task?.error || '未知原因'}`,
+              };
+              newLogs.push({
+                id: `log-${generateId()}`,
+                nodeId: currentNode.id,
+                nodeName: currentNode.name,
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: `Agent 队列任务${task?.status === 'failed' ? '失败' : '超时'}`,
+              });
+              break;
+            }
+          }
+
           const targetModel = config?.model || 'gpt-4o';
           const channelInfo = await getChannelForModel(targetModel) || await getAvailableChannelFromStore();
 
@@ -802,11 +1025,8 @@ export const useStore = create<AppState>()(
           } else {
             // 组装 Agent 消息
             const agentMessages: Array<{ role: 'system' | 'user' | 'assistant' | 'tool'; content: string }> = [];
-            if (config?.systemPrompt) {
-              agentMessages.push({ role: 'system', content: config.systemPrompt });
-            } else {
-              agentMessages.push({ role: 'system', content: '你是一个专业的 AI 助手，请完成以下任务。' });
-            }
+            const systemPrompt = substituteTemplate(config?.systemPrompt || '你是一个专业的 AI 助手。', newVariables);
+            agentMessages.push({ role: 'system', content: systemPrompt });
 
             // 从变量中获取上下文作为输入
             const contextStr = Object.entries(newVariables)
@@ -840,6 +1060,9 @@ export const useStore = create<AppState>()(
                 message: `Agent 任务执行完成 (${result.provider}/${result.model})`,
                 data: { output: result.content?.slice(0, 200) },
               });
+              if (agentId) {
+                registry.recordTaskResult(agentId, true, Date.now() - startTime);
+              }
             } else {
               newVariables['agent_result'] = {
                 status: 'failed',
@@ -853,6 +1076,9 @@ export const useStore = create<AppState>()(
                 level: 'error',
                 message: `Agent 执行失败: ${result.message}`,
               });
+              if (agentId) {
+                registry.recordTaskResult(agentId, false, Date.now() - startTime);
+              }
             }
           }
         } catch (error: any) {
@@ -868,6 +1094,9 @@ export const useStore = create<AppState>()(
             level: 'error',
             message: `Agent 执行异常: ${error.message}`,
           });
+          if (agentId) {
+            registry.recordTaskResult(agentId, false, Date.now() - startTime);
+          }
         }
         break;
       }
@@ -896,6 +1125,22 @@ export const useStore = create<AppState>()(
           .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
           .join('\n');
 
+        // Agent 间消息总线集成
+        const bus = getAgentMessageBus();
+        const runtimeRegistry = getAgentRuntimeRegistry();
+
+        // 为每个子 Agent 注册消息处理器
+        subAgents.forEach((a: SubAgentDef, idx: number) => {
+          const agentRuntimeId = `${currentNode.id}_sub_${idx}`;
+          runtimeRegistry.register(agentRuntimeId, a.tools || [], 1);
+          bus.subscribe(agentRuntimeId, (msg) => {
+            if (msg.type === 'request' || msg.type === 'notify') {
+              const contextKey = `__msg_from_${msg.fromAgentId}`;
+              newVariables[contextKey] = msg.content;
+            }
+          });
+        });
+
         // 单个子 Agent 执行函数
         const runOne = async (a: SubAgentDef) => {
           const targetModel = a.model || 'gpt-4o';
@@ -914,7 +1159,7 @@ export const useStore = create<AppState>()(
               : fullContext || '请开始执行任务';
 
           const messages = [
-            { role: 'system' as const, content: a.systemPrompt || '你是一个专业的 AI 助手。' },
+            { role: 'system' as const, content: substituteTemplate(a.systemPrompt || '你是一个专业的 AI 助手。', newVariables) },
             { role: 'user' as const, content: input },
           ];
           const tools = resolveToolSchemas(a.tools);
@@ -936,11 +1181,27 @@ export const useStore = create<AppState>()(
 
         // 并行 / 串行调度
         let results: Array<{ name: string; status: string; output: string; model: string }>;
-        if (config?.parallel === false) {
-          results = [];
-          for (const a of subAgents) results.push(await runOne(a));
-        } else {
-          results = await Promise.all(subAgents.map(runOne));
+        try {
+          if (config?.parallel === false) {
+            results = [];
+            for (const a of subAgents) results.push(await runOne(a));
+          } else {
+            results = await Promise.all(subAgents.map(runOne));
+          }
+        } catch (err: any) {
+          newVariables['agent_result'] = {
+            status: 'failed',
+            output: `子Agent执行失败: ${err.message}`,
+          };
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `子Agent执行失败: ${err.message}`,
+          });
+          break;
         }
 
         // 聚合各子 Agent 输出
@@ -986,6 +1247,12 @@ export const useStore = create<AppState>()(
           level: 'success',
           message: `SubAgent 编排完成：${subAgents.length} 个子 Agent，${completedCount} 个成功`,
         });
+        // 清理 Runtime Registry
+        subAgents.forEach((_, idx) => {
+          const runtimeId = `${currentNode.id}_sub_${idx}`;
+          runtimeRegistry.unregister(runtimeId);
+          getAgentMessageBus().unsubscribe(runtimeId);
+        });
         break;
       }
 
@@ -1007,16 +1274,7 @@ export const useStore = create<AppState>()(
 
         // 模板替换：将 {{变量名}} 替换为实际变量值
         let messageText = config.message || '';
-        const varRegex = /\{\{(\w+)\}\}/g;
-        let match;
-        while ((match = varRegex.exec(messageText)) !== null) {
-          const varName = match[1];
-          const varValue = newVariables[varName];
-          const replacement = varValue != null
-            ? (typeof varValue === 'string' ? varValue : JSON.stringify(varValue))
-            : '';
-          messageText = messageText.replace(match[0], replacement);
-        }
+        messageText = substituteTemplate(messageText, newVariables);
 
         newLogs.push({
           id: `log-${generateId()}`,
@@ -1127,10 +1385,7 @@ export const useStore = create<AppState>()(
           if (connectedHosts.length > 0 && config?.code) {
             const host = connectedHosts[0];
             // 变量替换
-            let code = config.code;
-            for (const [varName, varVal] of Object.entries(newVariables)) {
-              code = code.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
-            }
+            let code = substituteTemplate(config.code, newVariables);
 
             // 通过 SSH API 执行代码
             const command = config.language === 'python'
@@ -1178,10 +1433,7 @@ export const useStore = create<AppState>()(
             // 没有可用的 SSH 主机 — 如果有 LLM 渠道，用 LLM 解释代码意图
             const channelInfo = await getAvailableChannelFromStore();
             if (channelInfo && config?.code) {
-              let code = config.code;
-              for (const [varName, varVal] of Object.entries(newVariables)) {
-                code = code.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
-              }
+              let code = substituteTemplate(config.code, newVariables);
 
               const result = await routedChatLLM({
                 messages: [
@@ -1243,11 +1495,8 @@ export const useStore = create<AppState>()(
 
         // 真实 HTTP 请求
         try {
-          let url = config?.url || '';
           // 变量替换 {{变量名}} 模板
-          for (const [varName, varVal] of Object.entries(newVariables)) {
-            url = url.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
-          }
+          let url = substituteTemplate(config?.url || '', newVariables);
 
           if (!url) {
             newLogs.push({
@@ -1267,11 +1516,8 @@ export const useStore = create<AppState>()(
 
             if (method !== 'GET') {
               if (config?.bodyType === 'json' && config?.body) {
-                body = config.body;
                 // 变量替换
-                for (const [varName, varVal] of Object.entries(newVariables)) {
-                  body = body!.replace(new RegExp(`\\{\\{${varName}\\}\\}`, 'g'), String(varVal));
-                }
+                body = substituteTemplate(config.body, newVariables);
                 headers['Content-Type'] = 'application/json';
               } else if (config?.body) {
                 body = config.body;
@@ -1579,6 +1825,48 @@ export const useStore = create<AppState>()(
         break;
       }
 
+      case 'knowledge': {
+        const kConfig = currentNode.defaultData?.knowledgeConfig;
+        newLogs.push({
+          id: `log-${generateId()}`,
+          nodeId: currentNode.id,
+          nodeName: currentNode.name,
+          timestamp: new Date().toISOString(),
+          level: 'info',
+          message: `检索知识库: ${kConfig?.query || '未指定查询'}`,
+        });
+        const kOutputVar = kConfig?.outputVariable || 'knowledge_result';
+        try {
+          // 注：需要 embedding 才能检索，这里先回退到关键词搜索
+          const docs = await fetch('/api/knowledge').then(r => r.json());
+          const query = (kConfig?.query || '').toLowerCase();
+          const results = query
+            ? docs.filter((d: any) => d.content.toLowerCase().includes(query) || d.title.toLowerCase().includes(query))
+            : docs.slice(0, 3);
+          newVariables[kOutputVar] = results;
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'success',
+            message: `知识库检索完成，返回 ${results.length} 条记录`,
+            data: { rows: results.length },
+          });
+        } catch (e) {
+          newVariables[kOutputVar] = [];
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `知识库检索失败`,
+          });
+        }
+        break;
+      }
+
       case 'database': {
         const config = currentNode.defaultData?.databaseConfig;
         newLogs.push({
@@ -1590,20 +1878,39 @@ export const useStore = create<AppState>()(
           message: `执行 ${config?.queryType || 'select'} 查询`,
         });
         const outputVar = config?.outputVariable || 'db_result';
-        newVariables[outputVar] = [{ id: 1, name: '示例数据' }];
-        newLogs.push({
-          id: `log-${generateId()}`,
-          nodeId: currentNode.id,
-          nodeName: currentNode.name,
-          timestamp: new Date().toISOString(),
-          level: 'success',
-          message: `数据库查询完成，返回 1 条记录`,
-          data: { rows: 1 },
-        });
+        try {
+          // 先只支持查询 LNAgent 自身的 SQLite 数据库
+          const query = config?.sql || 'SELECT 1';
+          const result = await fetch('/api/db/query', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query }),
+          }).then(r => r.json());
+          newVariables[outputVar] = result.rows || [];
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'success',
+            message: `数据库查询完成，返回 ${(result.rows || []).length} 条记录`,
+            data: { rows: (result.rows || []).length },
+          });
+        } catch (e) {
+          newVariables[outputVar] = [];
+          newLogs.push({
+            id: `log-${generateId()}`,
+            nodeId: currentNode.id,
+            nodeName: currentNode.name,
+            timestamp: new Date().toISOString(),
+            level: 'error',
+            message: `数据库查询失败`,
+          });
+        }
         break;
       }
 
-      case 'human-in-loop': {
+      case 'human_in_loop': {
         newLogs.push({
           id: `log-${generateId()}`,
           nodeId: currentNode.id,
@@ -1612,6 +1919,10 @@ export const useStore = create<AppState>()(
           level: 'warn',
           message: '等待人工审核...',
         });
+        // 通过边路由找到下一个节点 ID，resume 时从下一节点开始
+        const outgoingEdges = workflow.edges.filter(e => e.source === currentNode.id);
+        const nextEdge = outgoingEdges[0]; // 简单取第一条出边
+        const nextNodeId = nextEdge?.target || '';
         set((s) => ({
           executionState: {
             ...s.executionState,
@@ -1620,6 +1931,7 @@ export const useStore = create<AppState>()(
             logs: newLogs,
             completedNodeIds: newCompleted,
             variables: newVariables,
+            currentNodeId: nextNodeId || s.executionState.currentNodeId,
           },
         }));
         return;
@@ -1708,9 +2020,29 @@ export const useStore = create<AppState>()(
     setTimeout(async () => {
       const currentState = get();
       if (currentState.executionState.isRunning && currentState.executionState.status === 'running') {
-        await get().stepExecution();
+        get().stepExecution().catch((err: any) => { console.error('stepExecution error:', err); });
       }
     }, 500);
+    } catch (err: any) {
+      set((s) => ({
+        executionState: {
+          ...s.executionState,
+          isRunning: false,
+          status: 'failed',
+          logs: [
+            ...s.executionState.logs,
+            {
+              id: generateId(),
+              nodeId: currentNode?.id || '',
+              nodeName: currentNode?.name || '',
+              timestamp: new Date().toISOString(),
+              level: 'error',
+              message: `执行异常: ${err.message}`,
+            },
+          ],
+        },
+      }));
+    }
   },
 
   addExecutionLog: (log) =>
@@ -1736,15 +2068,37 @@ export const useStore = create<AppState>()(
           [name]: value,
         },
       },
+      executionVariables: {
+        ...state.executionVariables,
+        [name]: value,
+      },
     })),
 
-  workflows: mockWorkflows,
-  agents: mockAgents,
+  executionVariables: {},
+  setExecutionVariables: (variables) =>
+    set((state) => ({
+      executionVariables: { ...state.executionVariables, ...variables },
+      executionState: {
+        ...state.executionState,
+        variables: { ...state.executionState.variables, ...variables },
+      },
+    })),
+  clearExecutionVariables: () =>
+    set((state) => ({
+      executionVariables: {},
+      executionState: {
+        ...state.executionState,
+        variables: {},
+      },
+    })),
+
+  workflows: [],
+  agents: [],
   plugins: mockPlugins,
   templates: mockTemplates,
-  messages: mockMessages,
+  messages: [],
   nodeTemplates: nodeTemplates,
-  currentWorkflowId: mockWorkflows[0]?.id || null,
+  currentWorkflowId: null,
   currentAgentId: null,
   sidebarCollapsed: false,
   selectedNodeId: null,
@@ -1755,8 +2109,18 @@ export const useStore = create<AppState>()(
   toggleSidebar: () => set({ sidebarCollapsed: !get().sidebarCollapsed }),
   setSelectedNode: (id) => set({ selectedNodeId: id }),
 
-  addMessage: (message) =>
-    set((state) => ({ messages: [...state.messages, message] })),
+  addMessage: async (message) => {
+    try {
+      await fetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(message),
+      });
+    } catch (e) {
+      console.warn('Failed to persist message:', e);
+    }
+    set((state) => ({ messages: [...state.messages, message] }));
+  },
   updateMessage: (id, updates) =>
     set((state) => ({
       messages: state.messages.map((m) => (m.id === id ? { ...m, ...updates } : m)),
@@ -1782,6 +2146,7 @@ export const useStore = create<AppState>()(
           : w
       ),
     }));
+    scheduleWorkflowSync(currentWorkflowId);
   },
 
   togglePlugin: (id) =>
@@ -1791,60 +2156,59 @@ export const useStore = create<AppState>()(
       ),
     })),
 
-  createWorkflow: (name, templateId) => {
+  createWorkflow: async (name, templateId) => {
     const template = templateId ? get().templates.find((t) => t.id === templateId) : null;
-    const newWorkflow: Workflow = {
-      id: `wf-${generateId()}`,
+    const payload = {
       name,
       description: template?.description || '新创建的工作流',
       nodes: [],
       edges: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
       status: 'draft',
       runs: 0,
-      variables: [],
+      variables: {},
     };
+    const created = await workflowApi.create(payload);
     set((state) => ({
-      workflows: [newWorkflow, ...state.workflows],
-      currentWorkflowId: newWorkflow.id,
+      workflows: [created, ...state.workflows],
+      currentWorkflowId: created.id,
     }));
-    return newWorkflow.id;
+    return created.id;
   },
 
-  deleteWorkflow: (id) =>
+  deleteWorkflow: async (id) => {
+    await workflowApi.delete(id);
     set((state) => ({
       workflows: state.workflows.filter((w) => w.id !== id),
       currentWorkflowId:
         state.currentWorkflowId === id
           ? state.workflows.find((w) => w.id !== id)?.id || null
           : state.currentWorkflowId,
-    })),
-
-  duplicateWorkflow: (id) => {
-    const source = get().workflows.find((w) => w.id === id);
-    if (!source) return null;
-    const newId = `wf-${generateId()}`;
-    const newWorkflow: Workflow = {
-      ...source,
-      id: newId,
-      name: `${source.name} 副本`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      runs: 0,
-    };
-    set((state) => ({ workflows: [newWorkflow, ...state.workflows] }));
-    return newId;
+    }));
   },
 
-  updateWorkflow: (id, updates) =>
+  duplicateWorkflow: async (id) => {
+    const source = get().workflows.find((w) => w.id === id);
+    if (!source) return null;
+    const payload = {
+      ...source,
+      name: `${source.name} 副本`,
+      runs: 0,
+    };
+    const created = await workflowApi.create(payload);
+    set((state) => ({ workflows: [created, ...state.workflows] }));
+    return created.id;
+  },
+
+  updateWorkflow: async (id, updates) => {
+    const updated = await workflowApi.update(id, updates);
     set((state) => ({
       workflows: state.workflows.map((w) =>
-        w.id === id ? { ...w, ...updates, updatedAt: new Date().toISOString() } : w
+        w.id === id ? updated : w
       ),
-    })),
+    }));
+  },
 
-  updateWorkflowNode: (workflowId, nodeId, updates) =>
+  updateWorkflowNode: (workflowId, nodeId, updates) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1866,9 +2230,11 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  duplicateWorkflowNode: (workflowId, nodeId) =>
+  duplicateWorkflowNode: (workflowId, nodeId) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1885,9 +2251,11 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  removeWorkflowNode: (workflowId, nodeId) =>
+  removeWorkflowNode: (workflowId, nodeId) => {
     set((state) => ({
       workflows: state.workflows.map((w) =>
         w.id === workflowId
@@ -1899,27 +2267,33 @@ export const useStore = create<AppState>()(
             }
           : w
       ),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  addWorkflowEdge: (workflowId, edge) =>
+  addWorkflowEdge: (workflowId, edge) => {
     set((state) => ({
       workflows: state.workflows.map((w) =>
         w.id === workflowId
           ? { ...w, edges: [...w.edges, edge], updatedAt: new Date().toISOString() }
           : w
       ),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  removeWorkflowEdge: (workflowId, edgeId) =>
+  removeWorkflowEdge: (workflowId, edgeId) => {
     set((state) => ({
       workflows: state.workflows.map((w) =>
         w.id === workflowId
           ? { ...w, edges: w.edges.filter((e) => e.id !== edgeId), updatedAt: new Date().toISOString() }
           : w
       ),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  addToolToNode: (workflowId, nodeId, tool) =>
+  addToolToNode: (workflowId, nodeId, tool) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1934,9 +2308,11 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  updateToolInNode: (workflowId, nodeId, toolId, updates) =>
+  updateToolInNode: (workflowId, nodeId, toolId, updates) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1955,9 +2331,11 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  removeToolFromNode: (workflowId, nodeId, toolId) =>
+  removeToolFromNode: (workflowId, nodeId, toolId) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1974,9 +2352,11 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
-  toggleToolEnabled: (workflowId, nodeId, toolId) =>
+  toggleToolEnabled: (workflowId, nodeId, toolId) => {
     set((state) => ({
       workflows: state.workflows.map((w) => {
         if (w.id !== workflowId) return w;
@@ -1995,7 +2375,9 @@ export const useStore = create<AppState>()(
           updatedAt: new Date().toISOString(),
         };
       }),
-    })),
+    }));
+    scheduleWorkflowSync(workflowId);
+  },
 
   addCheckpoint: (workflowId, label, snapshot) =>
     set((state) => {
@@ -2029,28 +2411,37 @@ export const useStore = create<AppState>()(
   startRun: () => set({ isRunning: true }),
   stopRun: () => set({ isRunning: false }),
 
-  createAgent: (agent) =>
-    set((state) => ({
-      agents: [
-        ...state.agents,
-        {
-          ...agent,
-          id: `agent-${generateId()}`,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    })),
+  createAgent: async (agent) => {
+    const created = await agentApi.create(agent);
+    set((state) => ({ agents: [...state.agents, created] }));
+    // 自动注册到 Runtime Registry
+    const registry = getAgentRuntimeRegistry();
+    const capabilities = (agent.tools || []).map(t => t);
+    if (agent.description) {
+      const desc = agent.description.toLowerCase();
+      if (desc.includes('代码') || desc.includes('code')) capabilities.push('code');
+      if (desc.includes('写') || desc.includes('write')) capabilities.push('writing');
+      if (desc.includes('分析') || desc.includes('analyze')) capabilities.push('reasoning');
+      if (desc.includes('搜索') || desc.includes('search')) capabilities.push('search');
+    }
+    registry.register(created.id, capabilities);
+  },
 
-  updateAgent: (id, updates) =>
+  updateAgent: async (id, updates) => {
+    const updated = await agentApi.update(id, updates);
     set((state) => ({
-      agents: state.agents.map((a) => (a.id === id ? { ...a, ...updates } : a)),
-    })),
+      agents: state.agents.map((a) => (a.id === id ? updated : a)),
+    }));
+  },
 
-  deleteAgent: (id) =>
+  deleteAgent: async (id) => {
+    getAgentRuntimeRegistry().unregister(id);
+    await agentApi.delete(id);
     set((state) => ({
       agents: state.agents.filter((a) => a.id !== id),
       currentAgentId: state.currentAgentId === id ? null : state.currentAgentId,
-    })),
+    }));
+  },
 
   // Meta-Skill (Skill-MAS)
   metaSkill: INITIAL_META_SKILL,
@@ -2201,37 +2592,236 @@ export const useStore = create<AppState>()(
         },
       ],
     })),
+
+  // ===== Workflow Editor (React Flow) =====
+  workflowEditorNodes: [],
+  workflowEditorEdges: [],
+  workflowEditorSelectedNodeId: null,
+  workflowEditorSelectedEdgeId: null,
+  workflowEditorPast: [],
+  workflowEditorFuture: [],
+
+  addWorkflowEditorNode: (node) => {
+    const state = get();
+    const newNode: FlowNode = {
+      ...node,
+      id: node.id || `node-${generateId()}`,
+    };
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorNodes: [...state.workflowEditorNodes, newNode],
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+    });
+  },
+
+  updateWorkflowEditorNode: (id, updates) => {
+    const state = get();
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorNodes: state.workflowEditorNodes.map((n) =>
+        n.id === id ? { ...n, ...updates } : n
+      ),
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+    });
+  },
+
+  deleteWorkflowEditorNode: (id) => {
+    const state = get();
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorNodes: state.workflowEditorNodes.filter((n) => n.id !== id),
+      workflowEditorEdges: state.workflowEditorEdges.filter((e) => e.source !== id && e.target !== id),
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+      workflowEditorSelectedNodeId: state.workflowEditorSelectedNodeId === id ? null : state.workflowEditorSelectedNodeId,
+    });
+  },
+
+  addWorkflowEditorEdge: (edge) => {
+    const state = get();
+    const newEdge: FlowEdge = {
+      ...edge,
+      id: edge.id || `edge-${generateId()}`,
+    };
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorEdges: [...state.workflowEditorEdges, newEdge],
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+    });
+  },
+
+  updateWorkflowEditorEdge: (id, updates) => {
+    const state = get();
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorEdges: state.workflowEditorEdges.map((e) =>
+        e.id === id ? { ...e, ...updates } : e
+      ),
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+    });
+  },
+
+  deleteWorkflowEditorEdge: (id) => {
+    const state = get();
+    const snapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    const newPast = [...state.workflowEditorPast, snapshot].slice(-50);
+    set({
+      workflowEditorEdges: state.workflowEditorEdges.filter((e) => e.id !== id),
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [],
+      workflowEditorSelectedEdgeId: state.workflowEditorSelectedEdgeId === id ? null : state.workflowEditorSelectedEdgeId,
+    });
+  },
+
+  undoWorkflowEditor: () => {
+    const state = get();
+    if (state.workflowEditorPast.length === 0) return;
+    const previous = state.workflowEditorPast[state.workflowEditorPast.length - 1];
+    const newPast = state.workflowEditorPast.slice(0, -1);
+    const currentSnapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    set({
+      workflowEditorNodes: previous.nodes,
+      workflowEditorEdges: previous.edges,
+      workflowEditorPast: newPast,
+      workflowEditorFuture: [currentSnapshot, ...state.workflowEditorFuture],
+      workflowEditorSelectedNodeId: null,
+      workflowEditorSelectedEdgeId: null,
+    });
+  },
+
+  redoWorkflowEditor: () => {
+    const state = get();
+    if (state.workflowEditorFuture.length === 0) return;
+    const next = state.workflowEditorFuture[0];
+    const newFuture = state.workflowEditorFuture.slice(1);
+    const currentSnapshot = { nodes: state.workflowEditorNodes, edges: state.workflowEditorEdges };
+    set({
+      workflowEditorNodes: next.nodes,
+      workflowEditorEdges: next.edges,
+      workflowEditorPast: [...state.workflowEditorPast, currentSnapshot].slice(-50),
+      workflowEditorFuture: newFuture,
+      workflowEditorSelectedNodeId: null,
+      workflowEditorSelectedEdgeId: null,
+    });
+  },
+
+  setWorkflowEditorSelectedNode: (id) =>
+    set({ workflowEditorSelectedNodeId: id, workflowEditorSelectedEdgeId: null }),
+
+  setWorkflowEditorSelectedEdge: (id) =>
+    set({ workflowEditorSelectedEdgeId: id, workflowEditorSelectedNodeId: null }),
+
+  loadWorkflowToEditor: (workflowId) => {
+    const state = get();
+    const workflow = state.workflows.find((w) => w.id === workflowId);
+    if (!workflow) return;
+
+    const flowNodes: FlowNode[] = workflow.nodes.map((node, index) => ({
+      id: node.id,
+      type: node.type,
+      position: { x: 100 + (index % 3) * 250, y: 100 + Math.floor(index / 3) * 200 },
+      data: {
+        label: node.name,
+        description: node.description,
+        iconName: node.icon,
+        type: node.type,
+        ...node.defaultData,
+      } as FlowNodeData,
+    }));
+
+    const flowEdges: FlowEdge[] = workflow.edges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourceHandle || null,
+      targetHandle: edge.targetHandle || null,
+      label: edge.label,
+      animated: false,
+    }));
+
+    set({
+      workflowEditorNodes: flowNodes,
+      workflowEditorEdges: flowEdges,
+      workflowEditorPast: [],
+      workflowEditorFuture: [],
+      workflowEditorSelectedNodeId: null,
+      workflowEditorSelectedEdgeId: null,
+    });
+  },
+
+  clearWorkflowEditor: () =>
+    set({
+      workflowEditorNodes: [],
+      workflowEditorEdges: [],
+      workflowEditorPast: [],
+      workflowEditorFuture: [],
+      workflowEditorSelectedNodeId: null,
+      workflowEditorSelectedEdgeId: null,
+    }),
+
+  // ===== 工作流调试器 =====
+  breakpoints: [],
+  nodeExecutionStatuses: {},
+
+  toggleBreakpoint: (nodeId: string) =>
+    set((state) => {
+      const hasBreakpoint = state.breakpoints.includes(nodeId);
+      return {
+        breakpoints: hasBreakpoint
+          ? state.breakpoints.filter((id) => id !== nodeId)
+          : [...state.breakpoints, nodeId],
+      };
+    }),
+
+  clearBreakpoints: () => set({ breakpoints: [] }),
+
+  setNodeExecutionStatus: (nodeId: string, status: NodeExecutionStatus) =>
+    set((state) => ({
+      nodeExecutionStatuses: {
+        ...state.nodeExecutionStatuses,
+        [nodeId]: status,
+      },
+    })),
+
+  clearNodeExecutionStatuses: () => set({ nodeExecutionStatuses: {} }),
     }),
     {
-      name: 'agentflow-data',
-      // 只持久化业务数据，不持久化运行时状态
+      name: 'lnagent-data',
+      // 持久化核心业务数据 + UI 状态 + 认证信息
+      // 后端连接异常时，前端仍能保留 channels/agents/workflows 等核心数据
       partialize: (state) => ({
+        // 认证
         currentUser: state.currentUser,
         isFirstTime: state.isFirstTime,
+        // 核心业务数据（必须持久化，否则刷新即丢失）
+        channels: state.channels,
         workflows: state.workflows,
         agents: state.agents,
-        channels: state.channels,
+        hosts: state.hosts,
+        mcps: state.mcps,
+        metaSkill: state.metaSkill,
+        // 模型路由与偏好
         defaultModelId: state.defaultModelId,
         routerEnabled: state.routerEnabled,
+        visionModelId: state.visionModelId,
         theme: state.theme,
-        hosts: state.hosts,
-        plugins: state.plugins,
-        messages: state.messages,
+        // UI 状态
         currentWorkflowId: state.currentWorkflowId,
         currentAgentId: state.currentAgentId,
         sidebarCollapsed: state.sidebarCollapsed,
-        metaSkill: state.metaSkill,
-        experienceBank: state.experienceBank,
-        routerMemory: state.routerMemory,
-        mcps: state.mcps,
-        checkpoints: state.checkpoints,
-        // Phase 10: 记忆架构持久化字段
+        // 记忆系统（持久化层）
         factualMemory: state.factualMemory,
         experientialReflections: state.experientialReflections,
-        extractionCursors: state.extractionCursors,
-        dreamLogs: state.dreamLogs,
-        handoffSummaries: state.handoffSummaries,
-        memoryAuditLog: state.memoryAuditLog,
+        routerMemory: state.routerMemory,
         // sessionMemories 不持久化（L0 仅存活于会话内）
       }),
       // 存储序列化冲突时静默处理
@@ -2306,12 +2896,10 @@ export const useStore = create<AppState>()(
       // 首次加载时：如果 localStorage 无数据，使用 mock 数据
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppState> | null;
-        // persistedState 是空对象（localStorage 无数据）时才使用 mock 初始值；
-        // 不能再用 workflows 做判断，否则只配了 channels / agents 的用户数据会被整体丢弃。
         if (!persisted || Object.keys(persisted).length === 0) {
           return currentState;
         }
-        // 合并：persisted 覆盖 currentState 的业务数据，mock 数据作为默认值保留
+        // 合并：persisted 只覆盖 UI 状态，业务数据由 App.tsx 的 useDataInit 从后端加载
         return { ...currentState, ...persisted };
       },
     },

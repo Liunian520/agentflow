@@ -1,10 +1,10 @@
-/**
+﻿/**
  * AES-GCM 加密工具 — 用于私钥安全存储和传输
  * 使用 Web Crypto API，密钥由后端 /api/crypto/key 获取
  */
 
-const CRYPTO_KEY_STORAGE = 'agentflow_crypto_key';
-const CRYPTO_KEY_EXPIRY = 'agentflow_crypto_key_expiry';
+const CRYPTO_KEY_STORAGE = 'lnagent_crypto_key';
+const CRYPTO_KEY_EXPIRY = 'lnagent_crypto_key_expiry';
 
 /** 从后端获取 AES 加密密钥（缓存 24h） */
 export async function getEncryptionKey(): Promise<string> {

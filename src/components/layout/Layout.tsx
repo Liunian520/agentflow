@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Menu, LogOut, User as UserIcon } from 'lucide-react';
@@ -69,7 +69,7 @@ export function Layout() {
             <Menu className="w-5 h-5" />
           </button>
           <div className="flex-1 text-center">
-            <span className="font-semibold text-text-primary">AgentFlow</span>
+            <span className="font-semibold text-text-primary">LNAgent</span>
           </div>
           <div className="relative" ref={userMenuRef}>
             <button

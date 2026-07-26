@@ -17,7 +17,8 @@ import {
 } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import { cn, generateId } from '../lib/utils';
-import type { Agent } from '../types';
+import type { Agent, AgentTemplate } from '../types';
+import { AGENT_TEMPLATES } from '../data/agentTemplates';
 import { getAvailableChannelFromStore, getChannelForModel, routedChatLLMStream } from '../api/llmApi';
 import { extractTaskFeatures } from '../lib/modelRouter';
 
@@ -49,7 +50,9 @@ export function AgentsPage() {
     systemPrompt: '',
     tools: [] as string[],
     temperature: 0.7,
+    maxTokens: undefined as number | undefined,
   });
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [agentSearch, setAgentSearch] = useState('');
   const filteredAgents = (() => {
@@ -205,8 +208,37 @@ export function AgentsPage() {
       systemPrompt: '',
       tools: [],
       temperature: 0.7,
+      maxTokens: undefined,
     });
+    setSelectedTemplateId(null);
     setDrawer('create');
+  };
+
+  const handleSelectTemplate = (template: AgentTemplate | null) => {
+    if (template) {
+      setSelectedTemplateId(template.id);
+      setCreateForm((prev) => ({
+        ...prev,
+        name: template.name,
+        avatar: template.avatar,
+        systemPrompt: template.systemPrompt,
+        tools: template.tools,
+        temperature: template.temperature,
+        maxTokens: template.maxTokens,
+      }));
+    } else {
+      setSelectedTemplateId(null);
+      setCreateForm({
+        name: '',
+        description: '',
+        avatar: '🤖',
+        model: 'GPT-4o',
+        systemPrompt: '',
+        tools: [],
+        temperature: 0.7,
+        maxTokens: undefined,
+      });
+    }
   };
 
   const handleSaveSettings = () => {
@@ -242,6 +274,7 @@ export function AgentsPage() {
       systemPrompt: createForm.systemPrompt || '你是一个专业的 AI 助手。',
       tools: createForm.tools,
       temperature: createForm.temperature,
+      maxTokens: createForm.maxTokens,
     });
     setDrawer(null);
     showToast('Agent 创建成功');
@@ -867,6 +900,45 @@ export function AgentsPage() {
                 className="p-1.5 rounded-md hover:bg-bg-hover text-text-tertiary hover:text-text-primary transition-colors"
               >
                 <X className="w-5 h-5" />
+              </button>
+            </div>
+            {/* 模板快速选择 */}
+            <div className="p-4 border-b border-border flex-shrink-0">
+              <div className="text-sm font-medium text-text-primary mb-2.5">从模板快速创建</div>
+              <div className="grid grid-cols-3 gap-2">
+                {AGENT_TEMPLATES.map((tpl) => {
+                  const selected = selectedTemplateId === tpl.id;
+                  return (
+                    <button
+                      key={tpl.id}
+                      onClick={() => handleSelectTemplate(tpl)}
+                      title={tpl.description}
+                      className={cn(
+                        'flex flex-col items-center gap-1 p-2.5 rounded-lg border text-center transition-all active:scale-[0.98]',
+                        selected
+                          ? 'border-accent bg-accent-bg ring-1 ring-accent'
+                          : 'border-border hover:border-accent hover:bg-bg-secondary'
+                      )}
+                    >
+                      <span className="text-xl">{tpl.avatar}</span>
+                      <span className={cn('text-xs font-medium', selected ? 'text-accent' : 'text-text-primary')}>
+                        {tpl.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+              <button
+                onClick={() => handleSelectTemplate(null)}
+                className={cn(
+                  'mt-2 w-full flex items-center justify-center gap-1.5 py-2 text-xs rounded-md border transition-all active:scale-[0.98]',
+                  selectedTemplateId === null
+                    ? 'border-accent text-accent bg-accent-bg'
+                    : 'border-border text-text-secondary hover:border-accent hover:bg-bg-secondary'
+                )}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                从空白创建
               </button>
             </div>
             {renderAgentForm(createForm, (updates) => setCreateForm((prev) => ({ ...prev, ...updates })), true)}

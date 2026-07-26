@@ -1,0 +1,12 @@
+name = "lnagent-api"
+compatibility_date = "2026-07-21"
+main = "index.ts"
+
+# 绕过 workers.dev 在国内的 DNS 污染，使用自定义域名
+routes = [
+  { pattern = "api.lnyun.site", custom_domain = true }
+]
+
+[[kv_namespaces]]
+binding = "AGENTFLOW_KV"
+id = "31498a62b7c348ec90ca6fc82f07c934"

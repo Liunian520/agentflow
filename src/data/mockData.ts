@@ -1,4 +1,4 @@
-import type { Workflow, Agent, Plugin, Template, ChatMessage, WorkflowNode, RemoteHost, Variable } from '../types';
+﻿import type { Workflow, Agent, Plugin, Template, ChatMessage, WorkflowNode, RemoteHost, Variable } from '../types';
 
 export const nodeTemplates: WorkflowNode[] = [
   {
@@ -264,8 +264,8 @@ export const nodeTemplates: WorkflowNode[] = [
     },
   },
   {
-    id: 'human-in-loop',
-    type: 'human-in-loop',
+    id: 'human_in_loop',
+    type: 'human_in_loop',
     name: '人工审核',
     description: '人工介入审核流程',
     icon: 'User',
@@ -273,7 +273,7 @@ export const nodeTemplates: WorkflowNode[] = [
     category: '交互与部署',
     defaultData: {
       label: '人工审核',
-      type: 'human-in-loop',
+      type: 'human_in_loop',
       iconName: 'User',
       humanConfig: {
         title: '需要人工审核',
@@ -659,7 +659,7 @@ export const mockPlugins: Plugin[] = [
     description: '让 Agent 能够搜索互联网获取最新信息',
     icon: 'Globe',
     category: '搜索',
-    author: 'AgentFlow',
+    author: 'LNAgent',
     downloads: 12500,
     stars: 456,
     version: '1.2.0',
@@ -672,7 +672,7 @@ export const mockPlugins: Plugin[] = [
     description: '在安全环境中执行 Python 和 JavaScript 代码',
     icon: 'Code2',
     category: '开发',
-    author: 'AgentFlow',
+    author: 'LNAgent',
     downloads: 9800,
     stars: 389,
     version: '2.0.1',
@@ -698,7 +698,7 @@ export const mockPlugins: Plugin[] = [
     description: '通过各种邮件服务发送通知和报告',
     icon: 'Mail',
     category: '通讯',
-    author: 'AgentFlow',
+    author: 'LNAgent',
     downloads: 5400,
     stars: 198,
     version: '1.1.0',
@@ -766,7 +766,7 @@ export const mockTemplates: Template[] = [
     description: '一键搭建智能客服，自动回复常见问题',
     thumbnail: 'https://images.unsplash.com/photo-1553775927-a071d5a6a39a?w=400&h=250&fit=crop',
     category: '客服',
-    author: 'AgentFlow',
+    author: 'LNAgent',
     uses: 2340,
     nodes: 8,
     tags: ['客服', '自动化', '常用'],

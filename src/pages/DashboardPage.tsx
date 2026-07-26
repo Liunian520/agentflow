@@ -1,4 +1,4 @@
-import {
+﻿import {
   Workflow,
   Play,
   Clock,
@@ -13,41 +13,53 @@ import {
 import { useStore } from '../store/useStore';
 import { formatDate, formatNumber, cn } from '../lib/utils';
 import { useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { dashboardApi } from '../api/dashboardApi';
 
 export function DashboardPage() {
   const navigate = useNavigate();
   const { workflows, agents, templates } = useStore();
+  const [stats, setStats] = useState({
+    workflowCount: workflows.length,
+    agentCount: agents.length,
+    totalRuns: workflows.reduce((sum, w) => sum + w.runs, 0),
+    successRate: 0,
+    activeSessions7d: 0,
+  });
 
-  const totalRuns = workflows.reduce((sum, w) => sum + w.runs, 0);
+  useEffect(() => {
+    dashboardApi.getStats().then((data) => setStats(data)).catch(() => {});
+  }, []);
+
   const publishedWorkflows = workflows.filter((w) => w.status === 'published').length;
 
-  const stats = [
+  const statCards = [
     {
       label: '工作流总数',
-      value: workflows.length,
+      value: stats.workflowCount,
       icon: Workflow,
-      change: '+12%',
+      change: `${stats.activeSessions7d} 活跃会话`,
       color: 'bg-violet-50 text-violet-600',
     },
     {
       label: '已发布',
       value: publishedWorkflows,
       icon: Zap,
-      change: '+8%',
+      change: `${stats.totalRuns} 次运行`,
       color: 'bg-emerald-50 text-emerald-600',
     },
     {
-      label: '总运行次数',
-      value: formatNumber(totalRuns),
+      label: '成功率',
+      value: `${stats.successRate}%`,
       icon: Play,
-      change: '+25%',
+      change: '7日统计',
       color: 'bg-blue-50 text-blue-600',
     },
     {
       label: 'Agent 数量',
-      value: agents.length,
+      value: stats.agentCount,
       icon: Bot,
-      change: '+3',
+      change: `${stats.activeSessions7d} 活跃`,
       color: 'bg-amber-50 text-amber-600',
     },
   ];
@@ -86,7 +98,7 @@ export function DashboardPage() {
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
-          {stats.map((stat, index) => {
+          {statCards.map((stat, index) => {
             const Icon = stat.icon;
             return (
               <div

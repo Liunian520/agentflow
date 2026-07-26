@@ -19,10 +19,14 @@ import {
   ToggleLeft,
   Type,
   Layers,
+  Activity,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { useStore } from '../../store/useStore';
-import type { ExecutionLog, ExecutionState } from '../../types';
+import type { ExecutionLog, ExecutionState, FlowNode, FlowEdge } from '../../types';
+import { JsonEditorPanel } from './JsonEditorPanel';
+import { ExecutionTimeline } from './ExecutionTimeline';
+import type { WorkflowTracer } from '../../lib/workflowTracer';
 
 const logLevelColors: Record<string, { bg: string; text: string; border: string }> = {
   info: { bg: 'bg-gray-100', text: 'text-gray-600', border: 'border-gray-200' },
@@ -264,9 +268,40 @@ function VariableItem({ name, value }: { name: string; value: any }) {
   );
 }
 
-export function ExecutionPanel() {
-  const [activeTab, setActiveTab] = useState<'logs' | 'variables'>('logs');
+interface ExecutionPanelProps {
+  onStart?: () => void;
+  onPause?: () => void;
+  onResume?: () => void;
+  onStop?: () => void;
+  onStep?: () => void;
+  nodes?: FlowNode[];
+  edges?: FlowEdge[];
+  workflowId?: string;
+  workflowName?: string;
+  workflowDescription?: string;
+  onApplyJson?: (nodes: FlowNode[], edges: FlowEdge[]) => void;
+  showJsonTab?: boolean;
+  tracer?: WorkflowTracer;
+}
+
+export function ExecutionPanel({
+  onStart,
+  onPause,
+  onResume,
+  onStop,
+  onStep,
+  nodes = [],
+  edges = [],
+  workflowId,
+  workflowName,
+  workflowDescription,
+  onApplyJson,
+  showJsonTab = true,
+  tracer,
+}: ExecutionPanelProps) {
+  const [activeTab, setActiveTab] = useState<'logs' | 'variables' | 'trace' | 'json'>('logs');
   const [duration, setDuration] = useState('00:00:00');
+  const [traceVersion, setTraceVersion] = useState(0);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   const executionState = useStore((state) => (state as any).executionState as ExecutionState) || {
@@ -280,11 +315,17 @@ export function ExecutionPanel() {
     status: 'idle' as const,
   };
 
-  const startExecution = useStore((state) => (state as any).startExecution || (() => {}));
-  const pauseExecution = useStore((state) => (state as any).pauseExecution || (() => {}));
-  const resumeExecution = useStore((state) => (state as any).resumeExecution || (() => {}));
-  const stopExecution = useStore((state) => (state as any).stopExecution || (() => {}));
-  const stepExecution = useStore((state) => (state as any).stepExecution || (() => {}));
+  const storeStartExecution = useStore((state) => (state as any).startExecution || (() => {}));
+  const storePauseExecution = useStore((state) => (state as any).pauseExecution || (() => {}));
+  const storeResumeExecution = useStore((state) => (state as any).resumeExecution || (() => {}));
+  const storeStopExecution = useStore((state) => (state as any).stopExecution || (() => {}));
+  const storeStepExecution = useStore((state) => (state as any).stepExecution || (() => {}));
+
+  const startExecution = onStart || storeStartExecution;
+  const pauseExecution = onPause || storePauseExecution;
+  const resumeExecution = onResume || storeResumeExecution;
+  const stopExecution = onStop || storeStopExecution;
+  const stepExecution = onStep || storeStepExecution;
 
   const status = executionState?.status || 'idle';
   const StatusIcon = statusConfig[status]?.icon || Clock;
@@ -320,6 +361,8 @@ export function ExecutionPanel() {
   const tabs = [
     { id: 'logs', label: '日志', icon: Terminal, count: logs.length },
     { id: 'variables', label: '变量', icon: Database, count: sortedVariableNames.length },
+    ...(tracer ? [{ id: 'trace', label: '追踪', icon: Activity, count: 0 }] : []),
+    ...(showJsonTab ? [{ id: 'json', label: 'JSON', icon: FileJson, count: 0 }] : []),
   ];
 
   const canStart = status === 'idle' || status === 'completed' || status === 'failed';
@@ -508,6 +551,26 @@ export function ExecutionPanel() {
               ))
             )}
           </div>
+        )}
+
+        {activeTab === 'trace' && tracer && (
+          <div className="h-full overflow-hidden" key={traceVersion}>
+            <ExecutionTimeline
+              rootSpan={tracer.getRootSpan()}
+              summary={tracer.getSummary()}
+            />
+          </div>
+        )}
+
+        {activeTab === 'json' && showJsonTab && onApplyJson && (
+          <JsonEditorPanel
+            nodes={nodes}
+            edges={edges}
+            workflowId={workflowId}
+            workflowName={workflowName}
+            workflowDescription={workflowDescription}
+            onApply={onApplyJson}
+          />
         )}
       </div>
     </div>

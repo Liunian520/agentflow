@@ -1,4 +1,4 @@
-/**
+﻿/**
  * ACRouter 自进化模型路由引擎 — 基于 Agent-as-a-Router 论文 (arXiv:2606.22902)
  *
  * C-A-F 闭环：Context(任务特征) → Action(选模型) → Feedback(执行反馈) → 回写 Memory → 越用越准
@@ -14,6 +14,7 @@ import type {
   RouterRecord, ModelPerfStats, AgentMode,
 } from '../types';
 import { generateId } from './utils';
+import { memoryApi } from '../api/memoryApi';
 
 // ===== 常量 =====
 const MIN_SAMPLES = 3;          // 统计先验生效的最小样本数
@@ -23,10 +24,12 @@ const COMPACT_BATCH = 200;      // 压缩时丢弃的最旧记录数
 const MAX_LATENCY = 30000;      // 延迟上限(ms)，用于归一化
 const MAX_TOKENS = 8000;        // token 上限（调大以适配长输出模型），用于归一化
 
-// 融合权重
-const W_STAT = 0.50;
-const W_KNN = 0.35;
-const W_COST = 0.15;
+// 融合权重：从 RouterEvolver 动态读取，支持自进化
+import { getRouterEvolver } from './routerEvolver';
+
+function getFusionWeights() {
+  return getRouterEvolver().getWeights();
+}
 
 // ===== 文本相似度（复用 experienceBank 的 Jaccard + 关键词加分逻辑） =====
 
@@ -261,6 +264,7 @@ export function selectModel(
   }
 
   // 为每个候选模型计算融合得分
+  const w = getFusionWeights();
   const candidates = pool.map((entry) => {
     const mKey = modelKey(entry.provider, entry.modelName);
     const stat = statPrior(memory, mKey, features.category);
@@ -274,7 +278,7 @@ export function selectModel(
       ? Math.max(0, 1 - costStats.avgCost / MAX_TOKENS)
       : 0.5;
 
-    const finalScore = W_STAT * statOrCold + W_KNN * knnVal + W_COST * costEff;
+    const finalScore = w.stat * statOrCold + w.knn * knnVal + w.cost * costEff;
     return { entry, mKey, finalScore, statOrCold, knnVal, costEff };
   });
 
@@ -297,12 +301,18 @@ export function selectModel(
     score: Number(c.finalScore.toFixed(3)),
   }));
 
+  // 追踪各预测器的最优模型，用于 RouterEvolver 评估准确性
+  const statTop = candidates.slice().sort((a, b) => b.statOrCold - a.statOrCold)[0]?.entry.modelName;
+  const knnTop = candidates.slice().sort((a, b) => b.knnVal - a.knnVal)[0]?.entry.modelName;
+  const costTop = candidates.slice().sort((a, b) => b.costEff - a.costEff)[0]?.entry.modelName;
+  const chosenModel = chosen.entry.modelName;
+
   const reasonParts: string[] = [];
   reasonParts.push(`${chosen.statOrCold >= 0.7 ? '统计/先验表现优' : '先验匹配'}`);
   if (chosen.knnVal !== chosen.statOrCold) reasonParts.push(`kNN相似任务均分${chosen.knnVal.toFixed(2)}`);
   reasonParts.push(`成本效率${chosen.costEff.toFixed(2)}`);
 
-  return {
+  const decision: RoutingDecision = {
     channelId: chosen.entry.channelId,
     modelName: chosen.entry.modelName,
     modelDisplayName: chosen.entry.displayName || chosen.entry.modelName,
@@ -314,6 +324,15 @@ export function selectModel(
     explored,
     strategy: explored ? 'explore' : 'score',
   };
+
+  // 暂存预测信息，供 recordRouterFeedback 评估准确性
+  (decision as any).__predictions = {
+    statCorrect: statTop === chosenModel,
+    knnCorrect: knnTop === chosenModel,
+    costCorrect: costTop === chosenModel,
+  };
+
+  return decision;
 }
 
 // ===== (F) Feedback — Verifier 评分 =====
@@ -343,7 +362,7 @@ export function buildRouterRecord(
   latencyMs: number,
   estTokens: number,
 ): RouterRecord {
-  return {
+  const record = {
     id: generateId(),
     timestamp: new Date().toISOString(),
     taskFeatures: features,
@@ -354,12 +373,45 @@ export function buildRouterRecord(
     score: computeFeedbackScore(outcome, latencyMs, estTokens),
     latencyMs,
     estTokens,
-  };
+  } as RouterRecord & { __predictions?: any };
+
+  // 传递预测信息
+  if ((decision as any).__predictions) {
+    record.__predictions = (decision as any).__predictions;
+  }
+
+  return record;
 }
 
 export async function recordRouterFeedback(record: RouterRecord): Promise<void> {
+  try {
+    await memoryApi.addRouterRecord(record);
+  } catch (e) {
+    console.warn('Failed to persist router record:', e);
+  }
+  // 同时更新本地 store 保持实时性
   const { useStore } = await import('../store/useStore');
   useStore.getState().addRouterRecord(record);
+
+  // 记录预测准确性到 RouterEvolver
+  const preds = (record as any).__predictions;
+  if (preds) {
+    getRouterEvolver().recordPrediction({
+      statCorrect: preds.statCorrect,
+      knnCorrect: preds.knnCorrect,
+      costCorrect: preds.costCorrect,
+    });
+  }
+
+  // 每 20 条记录触发一次路由进化
+  const EVOLVE_INTERVAL = 20;
+  const records = useStore.getState().routerMemory;
+  if (records.length > 0 && records.length % EVOLVE_INTERVAL === 0) {
+    const result = getRouterEvolver().evolve();
+    if (result) {
+      console.log(`[RouterEvolver] 权重进化: stat ${result.oldWeights.stat.toFixed(2)}→${result.newWeights.stat.toFixed(2)}, knn ${result.oldWeights.knn.toFixed(2)}→${result.newWeights.knn.toFixed(2)}, cost ${result.oldWeights.cost.toFixed(2)}→${result.newWeights.cost.toFixed(2)}`);
+    }
+  }
 }
 
 // ===== 聚合统计（供仪表盘） =====
@@ -383,11 +435,22 @@ export function compactMemory(memory: RouterRecord[]): RouterRecord[] {
   return memory.slice(COMPACT_BATCH);
 }
 
+// ===== 获取路由记忆快照（从后端） =====
+export async function getRouterMemorySnapshot(): Promise<RouterRecord[]> {
+  try {
+    return await memoryApi.getRouterRecords();
+  } catch {
+    const { useStore } = await import('../store/useStore');
+    return useStore.getState().routerMemory;
+  }
+}
+
 // ===== 从 Store 触发压缩 =====
 export async function maybeCompactRouterMemory(): Promise<void> {
-  const { useStore } = await import('../store/useStore');
-  const store = useStore.getState();
-  if (store.routerMemory.length > MEMORY_CAP) {
-    store.setRouterMemory(compactMemory(store.routerMemory));
+  const records = await getRouterMemorySnapshot();
+  if (records.length > MEMORY_CAP) {
+    const compacted = compactMemory(records);
+    const { useStore } = await import('../store/useStore');
+    useStore.getState().setRouterMemory(compacted);
   }
 }

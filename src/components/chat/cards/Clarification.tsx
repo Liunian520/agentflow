@@ -1,4 +1,4 @@
-import { HelpCircle, ArrowRight } from 'lucide-react';
+﻿import { HelpCircle, ArrowRight } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 
 interface ClarificationProps {
