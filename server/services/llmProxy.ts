@@ -4,8 +4,8 @@
  */
 
 import express, { Request, Response } from 'express';
-import crypto from 'crypto';
-import { assertSafeOutboundUrl } from './urlGuard';
+import { assertSafeOutboundUrl, safeFetch } from './urlGuard';
+import { decryptAesGcm, getOrCreateAesKey } from './crypto';
 
 const router = express.Router();
 
@@ -47,39 +47,6 @@ function resolveApiKey(apiKey: string, apiKeyEncrypted?: string): string {
   return apiKey;
 }
 
-// 复用 server/index.ts 中的加密函数
-let currentAesKey: string = '';
-let aesKeyGeneratedAt: number = 0;
-const AES_KEY_ROTATION_MS = 24 * 60 * 60 * 1000;
-const AES_KEY_ENV = process.env.AES_ENCRYPTION_KEY;
-
-function getOrCreateAesKey(): string {
-  if (AES_KEY_ENV) return AES_KEY_ENV;
-  const now = Date.now();
-  if (!currentAesKey || now - aesKeyGeneratedAt > AES_KEY_ROTATION_MS) {
-    currentAesKey = crypto.randomBytes(32).toString('hex');
-    aesKeyGeneratedAt = now;
-  }
-  return currentAesKey;
-}
-
-function decryptAesGcm(encrypted: string, keyHex: string): string {
-  const [ivHex, ctHex] = encrypted.split(':');
-  if (!ivHex || !ctHex) throw new Error('加密数据格式错误');
-
-  const keyBuf = Buffer.from(keyHex, 'hex');
-  const ivBuf = Buffer.from(ivHex, 'hex');
-  const ctBuf = Buffer.from(ctHex, 'hex');
-
-  const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuf, ivBuf);
-  const authTag = ctBuf.slice(ctBuf.length - 16);
-  const ciphertext = ctBuf.slice(0, ctBuf.length - 16);
-  decipher.setAuthTag(authTag);
-
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return decrypted.toString('utf8');
-}
-
 // ===== SSE 辅助 =====
 function setupSSE(res: Response): void {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -92,6 +59,10 @@ function setupSSE(res: Response): void {
 function sendSSE(res: Response, event: string, data: any): void {
   if (res.writableEnded) return;
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+function endResponse(res: Response): void {
+  if (!res.writableEnded) res.end();
 }
 
 // 上游请求超时（等待响应头）。给慢速/冷启动上游留足时间，同时避免连接永久悬挂
@@ -109,9 +80,10 @@ async function fetchUpstream(url: string, init: RequestInit, res?: Response): Pr
   const onClose = () => controller.abort(new Error('客户端已断开'));
   if (res) res.on('close', onClose);
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    return await safeFetch(url, { ...init, signal: controller.signal }, '上游 URL');
   } finally {
     clearTimeout(timer);
+    if (res) res.off('close', onClose);
   }
 }
 
@@ -350,7 +322,7 @@ async function callGoogleFormat(
     contents: geminiContents,
     generationConfig: {
       temperature: body.temperature ?? 0.7,
-      maxOutputTokens: body.maxTokens || 4096,
+      maxOutputTokens: body.max_tokens ?? body.maxTokens ?? 4096,
     },
   };
   if (systemContent) {
@@ -435,7 +407,7 @@ async function callOpenAIRaw(
   body: Record<string, any>,
 ): Promise<any> {
   const url = `${baseUrl.replace(/\/+$/, '')}/chat/completions`;
-  const response = await fetch(url, {
+  const response = await fetchUpstream(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ ...body, stream: false }),
@@ -524,7 +496,7 @@ async function callAnthropicRaw(apiKey: string, baseUrl: string, body: Record<st
   };
   if (system) payload.system = system;
   if (anthropicTools.length > 0) payload.tools = anthropicTools;
-  const response = await fetch(url, {
+  const response = await fetchUpstream(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -754,7 +726,7 @@ async function streamAgenticLoop(
       if (toolUses.length === 0) {
         if (text) streamTextChunked(res, text);
         sendSSE(res, 'done', { content: text });
-        res.end();
+        endResponse(res);
         return;
       }
 
@@ -772,7 +744,7 @@ async function streamAgenticLoop(
       const outcome = await streamOpenAIRound(res, baseUrl, apiKey, body);
       if (outcome.type === 'final') {
         sendSSE(res, 'done', { content: outcome.content });
-        res.end();
+        endResponse(res);
         return;
       }
       messages.push(outcome.assistantMsg);
@@ -791,7 +763,7 @@ async function streamAgenticLoop(
   }
 
   sendSSE(res, 'done', { content: '[已达到最大工具调用轮次，停止以避免无限循环]' });
-  res.end();
+  endResponse(res);
 }
 
 // ===== 模型池拉取 =====

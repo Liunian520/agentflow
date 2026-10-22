@@ -11,7 +11,7 @@
 
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
-import { assertSafeOutboundUrl } from './urlGuard';
+import { assertSafeOutboundUrl, safeFetch } from './urlGuard';
 
 const router = Router();
 
@@ -77,15 +77,15 @@ async function fetchWithTimeout(
   url: string,
   options: RequestInit,
   timeoutMs: number = A2A_TIMEOUT,
-): Promise<Response> {
+): Promise<globalThis.Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       ...options,
       signal: controller.signal,
-    });
+    }, 'A2A');
     clearTimeout(timer);
     return response;
   } catch (err: any) {
@@ -224,7 +224,7 @@ async function streamTask(
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), A2A_TIMEOUT);
 
-    const response = await fetch(endpoint, {
+    const response = await safeFetch(endpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -233,7 +233,7 @@ async function streamTask(
       },
       body: JSON.stringify(body),
       signal: controller.signal,
-    });
+    }, 'A2A');
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
