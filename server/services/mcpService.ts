@@ -11,7 +11,7 @@ import express from 'express';
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { assertSafeOutboundUrl } from './urlGuard';
+import { assertSafeOutboundUrl, safeFetch } from './urlGuard';
 
 /**
  * 校验 local-fs 要暴露的目录：
@@ -20,45 +20,47 @@ import { assertSafeOutboundUrl } from './urlGuard';
  *  - 拒绝系统敏感根目录
  *  - 若配置了 MCP_FS_ALLOWED_ROOTS（逗号分隔），则必须位于其中之一
  */
-function assertSafeFsDir(dir: string): string {
+export function assertSafeFsDir(dir: string): string {
   if (!dir || !path.isAbsolute(dir)) {
     throw new Error('fsDir 必须为绝对路径');
   }
   const resolved = path.resolve(dir);
-  if (resolved.includes('..')) {
-    throw new Error('fsDir 含非法路径穿越');
+
+  let real = resolved;
+  try {
+    real = fs.realpathSync(resolved);
+  } catch {
+    throw new Error(`fsDir 不存在: ${resolved}`);
   }
 
-  const deniedRoots = [
-    '/', '/etc', '/root', '/boot', '/sys', '/proc', '/var', '/usr', '/bin', '/sbin',
-    'C:\\', 'C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)',
-  ].map((p) => path.resolve(p).toLowerCase());
-  if (deniedRoots.includes(resolved.toLowerCase())) {
-    throw new Error(`fsDir 拒绝暴露系统目录: ${resolved}`);
+  const deniedRoots = ['/etc', '/root', '/boot', '/sys', '/proc', '/dev', '/run', '/bin', '/sbin', '/usr', '/var'];
+  const lower = real.toLowerCase();
+  if (lower === '/' || deniedRoots.some((root) => lower === root || lower.startsWith(root + path.sep))) {
+    throw new Error(`fsDir 拒绝暴露系统目录: ${real}`);
   }
 
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(resolved);
+    stat = fs.statSync(real);
   } catch {
-    throw new Error(`fsDir 不存在: ${resolved}`);
+    throw new Error(`fsDir 不存在: ${real}`);
   }
   if (!stat.isDirectory()) {
-    throw new Error(`fsDir 不是目录: ${resolved}`);
+    throw new Error(`fsDir 不是目录: ${real}`);
   }
 
   const allowed = (process.env.MCP_FS_ALLOWED_ROOTS || '')
     .split(',').map((s) => s.trim()).filter(Boolean).map((p) => path.resolve(p));
   if (allowed.length > 0) {
     const ok = allowed.some((root) => {
-      const rel = path.relative(root, resolved);
+      const rel = path.relative(root, real);
       return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
     });
     if (!ok) {
-      throw new Error(`fsDir 不在允许的根目录白名单内: ${resolved}`);
+      throw new Error(`fsDir 不在允许的根目录白名单内: ${real}`);
     }
   }
-  return resolved;
+  return real;
 }
 
 export interface McpTool {
@@ -103,11 +105,11 @@ async function rpc(session: McpSession, method: string, params: any, notify = fa
   };
   if (session.sessionId) headers['Mcp-Session-Id'] = session.sessionId;
 
-  const res = await fetch(session.config.url!, {
+  const res = await safeFetch(session.config.url!, {
     method: 'POST',
     headers,
     body: JSON.stringify({ jsonrpc: '2.0', id: notify ? undefined : Date.now(), method, params }),
-  });
+  }, 'MCP url');
 
   // 捕获 MCP Streamable HTTP 在 initialize 响应头返回的会话 ID
   const sid = res.headers.get('mcp-session-id');
@@ -126,8 +128,9 @@ async function rpc(session: McpSession, method: string, params: any, notify = fa
         const msg = JSON.parse(dataLine.slice(5).trim());
         if (msg.error) throw new Error(msg.error.message || 'MCP RPC error');
         if (msg.result) return msg.result;
-      } catch {
-        // 跳过无法解析的块
+      } catch (err) {
+        if (err instanceof SyntaxError) continue;
+        throw err;
       }
     }
     return null;

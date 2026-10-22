@@ -127,6 +127,7 @@ const intentPatterns: IntentPattern[] = [
     minConfidence: 0.75,
     extractParams: (text) => ({
       workflowId: extractWorkflowId(text),
+      workflowName: extractRunnableWorkflowName(text),
     }),
   },
 
@@ -193,13 +194,11 @@ const intentPatterns: IntentPattern[] = [
 // 辅助提取函数
 
 function extractAgentName(text: string): string {
-  // 尝试匹配 "一个xxx的Agent" 或 "xxx助手"
-  const match = text.match(/(?:一个|名叫|叫)?(.+?)(?:的agent|的助手|agent|助手|智能体)/i);
+  // 从动词后面取名称，避免把「帮我创建」吃进名字
+  const match = text.match(/(?:创建|新建|添加|建)\s*(?:一个)?\s*(?:名叫|名为|叫)?\s*(.+?)(?:的)?(?:agent|助手|智能体)/i);
   if (match && match[1].trim()) {
-    const name = match[1].trim();
-    // 过滤常见无关词
-    if (['帮我', '请', '可以', '能够', '会', '能'].includes(name)) return '';
-    return name;
+    const name = match[1].trim().replace(/^(?:一个|名叫|名为|叫)/, '').trim();
+    if (name && !['帮我', '请', '可以', '能够', '会', '能'].includes(name)) return name;
   }
   // 尝试匹配角色描述
   const roleMatch = text.match(/写文案|翻译|数据分析|客服|编程|运维|设计|营销|写作/i);
@@ -249,8 +248,10 @@ function extractDescription(text: string): string {
 }
 
 function extractWorkflowName(text: string): string {
-  const match = text.match(/(?:一个|名叫|叫)?(.+?)(?:的工作流|流程|pipeline)/i);
-  if (match && match[1].trim()) return match[1].trim();
+  const match = text.match(/(?:创建|新建|设计|编排|建)\s*(?:一个)?\s*(?:名叫|名为|叫)?\s*(.+?)(?:的)?(?:工作流|流程|pipeline)/i);
+  if (match && match[1].trim()) {
+    return match[1].trim().replace(/^(?:一个|名叫|名为|叫)/, '').trim();
+  }
 
   // 从功能描述推断名称
   const descMatch = text.match(/内容审核|数据分析|翻译|客服|营销|运维|监控/i);
@@ -330,6 +331,15 @@ function extractHostId(_text: string): string {
 
 function extractWorkflowId(_text: string): string {
   return '';
+}
+
+function extractRunnableWorkflowName(text: string): string {
+  const match = text.match(/(?:运行|执行|启动|跑)\s*(?:一下)?\s*(.+)$/i);
+  if (!match) return '';
+  let name = match[1].trim().replace(/^(?:一个|这个|那个)/, '').trim();
+  name = name.replace(/(?:工作流|流程)$/g, '').trim();
+  if (!name || ['工作流', '流程', '一下', '它'].includes(name)) return '';
+  return name;
 }
 
 function extractAgentId(_text: string): string {

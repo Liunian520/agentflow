@@ -61,10 +61,11 @@ export function AgentsPage() {
   })();
 
   const currentAgent = agents.find((a) => a.id === selectedAgent);
+  const threadMessages = messages.filter((m) => m.agentId === selectedAgent);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [threadMessages.length, selectedAgent]);
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -131,7 +132,7 @@ export function AgentsPage() {
     // 组装 LLM 请求消息
     const agentSystemPrompt = agent?.systemPrompt || '你是一个专业的 AI 助手。';
     const recentMessages = useStore.getState().messages
-      .filter(m => m.agentId === selectedAgent || (!m.agentId && selectedAgent))
+      .filter(m => m.agentId === selectedAgent && m.id !== userMessage.id && m.id !== streamMsgId)
       .slice(-8)
       .map(m => ({
         role: m.role as 'user' | 'assistant',
@@ -595,7 +596,7 @@ export function AgentsPage() {
                   </div>
                 </div>
 
-                {messages.map((msg) => (
+                {threadMessages.map((msg) => (
                   <div
                     key={msg.id}
                     className={cn(

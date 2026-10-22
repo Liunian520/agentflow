@@ -92,13 +92,17 @@ export function executeAction(intent: ParsedIntent): ActionResult {
 
     case 'run_workflow': {
       try {
-        const { workflowId } = intent.params;
-        if (workflowId) {
-          store.setCurrentWorkflow(workflowId);
+        const { workflowId, workflowName } = intent.params;
+        let currentId = workflowId as string | undefined;
+        if (!currentId && workflowName) {
+          const hint = String(workflowName).trim();
+          const found = store.workflows.find((w: any) =>
+            w.name === hint || w.name.includes(hint) || hint.includes(w.name)
+          );
+          currentId = found?.id;
         }
-        const currentId = workflowId || store.currentWorkflowId;
         if (!currentId) {
-          return { success: false, type: 'workflow_run', error: '请指定要运行的工作流' };
+          return { success: false, type: 'workflow_run', error: '请说明要运行的工作流名称' };
         }
         store.setCurrentWorkflow(currentId);
         store.startExecution();

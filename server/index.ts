@@ -1,11 +1,11 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import crypto from 'crypto';
 import { SSHService } from './services/sshService';
 import llmProxyRouter from './services/llmProxy';
 import { registerMcpRoutes } from './services/mcpService';
 import a2aRouter from './services/a2aService';
+import { aesKeyExpiresIn, decryptAesGcm, getOrCreateAesKey } from './services/crypto';
 
 dotenv.config();
 
@@ -18,6 +18,10 @@ const allowedOrigins = [
   'http://localhost:5174',
   'http://localhost:5175',
   'http://localhost:5176',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175',
+  'http://127.0.0.1:5176',
   'https://agentflow.pages.dev',
   'https://agentflow.vercel.app',
   'https://agentflow.netlify.app',
@@ -35,8 +39,8 @@ app.use(cors({
     if (allAllowed.includes(origin)) return callback(null, true);
     // Cloudflare Pages 子域名通配 (*.pages.dev)
     if (origin.endsWith('.pages.dev')) return callback(null, true);
-    // 其他来源一律拒绝
-    callback(new Error('CORS policy: origin not allowed'));
+    // 拒绝时不要抛错，否则 cors 会把策略拒绝变成 HTTP 500
+    callback(null, false);
   },
   credentials: true,
 }));
@@ -55,49 +59,10 @@ app.use('/api', a2aRouter);
 
 const sshService = new SSHService();
 
-// ===== AES 加密密钥管理 =====
-// 服务端生成 256-bit AES 密钥，用于前端加密私钥
-// 密钥定期轮换（每 24h），通过环境变量可固定
-const AES_KEY_ENV = process.env.AES_ENCRYPTION_KEY; // 可固定密钥，否则自动生成
-let currentAesKey: string;
-let aesKeyGeneratedAt: number = 0;
-const AES_KEY_ROTATION_MS = 24 * 60 * 60 * 1000; // 24h
-
-function getOrCreateAesKey(): string {
-  if (AES_KEY_ENV) return AES_KEY_ENV;
-  const now = Date.now();
-  if (!currentAesKey || now - aesKeyGeneratedAt > AES_KEY_ROTATION_MS) {
-    currentAesKey = crypto.randomBytes(32).toString('hex');
-    aesKeyGeneratedAt = now;
-  }
-  return currentAesKey;
-}
-
-// 前端获取加密密钥（仅限白名单 origin）
+// 前端获取加密密钥（仅限白名单 origin）。密钥实现见 services/crypto.ts。
 app.get('/api/crypto/key', (req, res) => {
-  const key = getOrCreateAesKey();
-  const expiresIn = AES_KEY_ENV ? 365 * 24 * 60 * 60 * 1000 : AES_KEY_ROTATION_MS;
-  res.json({ key, expiresIn });
+  res.json({ key: getOrCreateAesKey(), expiresIn: aesKeyExpiresIn() });
 });
-
-// 后端解密前端发送的 AES-GCM 加密数据
-function decryptAesGcm(encrypted: string, keyHex: string): string {
-  const [ivHex, ctHex] = encrypted.split(':');
-  if (!ivHex || !ctHex) throw new Error('加密数据格式错误');
-
-  const keyBuf = Buffer.from(keyHex, 'hex');
-  const ivBuf = Buffer.from(ivHex, 'hex');
-  const ctBuf = Buffer.from(ctHex, 'hex');
-
-  const decipher = crypto.createDecipheriv('aes-256-gcm', keyBuf, ivBuf);
-  // GCM 需要设置 auth tag（最后 16 bytes of ciphertext）
-  const authTag = ctBuf.slice(ctBuf.length - 16);
-  const ciphertext = ctBuf.slice(0, ctBuf.length - 16);
-  decipher.setAuthTag(authTag);
-
-  const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-  return decrypted.toString('utf8');
-}
 
 // SSH connect 端点 — 支持加密私钥
 app.post('/api/ssh/connect', async (req, res) => {

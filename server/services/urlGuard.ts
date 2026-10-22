@@ -104,3 +104,36 @@ export async function assertSafeOutboundUrl(rawUrl: string, label = 'URL'): Prom
 
   return rawUrl;
 }
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * 出站 fetch：禁止自动跟随重定向，每一跳都重新做 SSRF 校验。
+ */
+export async function safeFetch(url: string, init: RequestInit = {}, label = 'URL'): Promise<globalThis.Response> {
+  let current = await assertSafeOutboundUrl(url, label);
+  let method = (init.method || 'GET').toUpperCase();
+  let body = init.body;
+
+  for (let hop = 0; hop < 5; hop++) {
+    const response = await fetch(current, {
+      ...init,
+      method,
+      body,
+      redirect: 'manual',
+    });
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get('location');
+    await response.body?.cancel().catch(() => undefined);
+    if (!location) throw new Error(`${label} 非法：重定向缺少 Location`);
+
+    current = await assertSafeOutboundUrl(new URL(location, current).toString(), label);
+    if (response.status === 301 || response.status === 302 || response.status === 303) {
+      method = 'GET';
+      body = undefined;
+    }
+  }
+
+  throw new Error(`${label} 非法：重定向次数过多`);
+}

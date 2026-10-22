@@ -200,6 +200,7 @@ export function WorkflowEditorPage() {
   // 路由不存在：等待加载完成，避免误判
   const isNotFound = workflowsLoaded && id && !currentWorkflow;
 
+  // 只在切换工作流时整图重载。属性编辑会更新 updatedAt，若跟着重载会把未保存的节点位置清掉。
   useEffect(() => {
     if (currentWorkflow) {
       const initialNodes = getInitialNodes(currentWorkflow);
@@ -208,7 +209,8 @@ export function WorkflowEditorPage() {
       setEdges(initialEdges);
       lastNodeCountRef.current = currentWorkflow.nodes.length;
     }
-  }, [id, currentWorkflow?.id, currentWorkflow?.updatedAt, setNodes, setEdges]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 故意不依赖 updatedAt
+  }, [id, currentWorkflow?.id, setNodes, setEdges]);
 
   useEffect(() => {
     if (!currentWorkflow || !reactFlowInstance) return;
