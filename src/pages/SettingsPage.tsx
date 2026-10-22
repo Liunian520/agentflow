@@ -141,6 +141,8 @@ export function SettingsPage() {
     setDefaultModelId,
     setRouterEnabled,
     setTheme,
+    sidebarCollapsed,
+    toggleSidebar,
   } = useStore();
 
   const [activeTab, setActiveTab] = useState<SettingsTab>('providers');
@@ -1295,8 +1297,8 @@ export function SettingsPage() {
                   <div className="text-xs text-text-tertiary">启动时侧边栏折叠为图标模式</div>
                 </div>
                 {renderToggle(
-                  useStore().sidebarCollapsed,
-                  () => useStore().toggleSidebar(),
+                  sidebarCollapsed,
+                  () => toggleSidebar(),
                   '切换侧边栏'
                 )}
               </div>
@@ -1315,11 +1317,11 @@ export function SettingsPage() {
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-bg-secondary rounded-md border border-border">
                   <Shield className="w-4 h-4 text-text-tertiary" />
-                  <span className="text-text-secondary">管理员密码使用 bcrypt 类哈希存储，不可逆</span>
+                  <span className="text-text-secondary">管理员密码只在浏览器里保存哈希，不保存明文</span>
                 </div>
                 <div className="flex items-center gap-2 p-3 bg-bg-secondary rounded-md border border-border">
                   <Server className="w-4 h-4 text-text-tertiary" />
-                  <span className="text-text-secondary">SSH 私钥使用 AES-GCM 加密存储于后端，前端仅发送公钥指纹</span>
+                  <span className="text-text-secondary">SSH 私钥发往后端时代理请求使用 AES-GCM 加密，请勿把后端暴露到不受信任的网络</span>
                 </div>
               </div>
             </div>
@@ -1339,12 +1341,13 @@ export function SettingsPage() {
                   <button
                     type="button"
                     onClick={() => {
+                      const state = useStore.getState();
                       const data = JSON.stringify({
-                        channels: useStore().channels,
-                        mcps: useStore().mcps,
-                        routerEnabled: useStore().routerEnabled,
-                        defaultModelId: useStore().defaultModelId,
-                        theme: useStore().theme,
+                        channels: state.channels,
+                        mcps: state.mcps,
+                        routerEnabled: state.routerEnabled,
+                        defaultModelId: state.defaultModelId,
+                        theme: state.theme,
                       }, null, 2);
                       const blob = new Blob([data], { type: 'application/json' });
                       const url = URL.createObjectURL(blob);
@@ -1378,23 +1381,24 @@ export function SettingsPage() {
                         try {
                           const text = await file.text();
                           const data = JSON.parse(text);
+                          const state = useStore.getState();
                           if (data.channels) {
                             data.channels.forEach((ch: any) => {
-                              if (!useStore().channels.find(c => c.id === ch.id)) {
-                                useStore().addChannel(ch);
-                              }
+                              const exists = state.channels.some((c) =>
+                                c.id === ch.id || (ch.name && c.name === ch.name && c.baseUrl === ch.baseUrl)
+                              );
+                              if (!exists) state.addChannel(ch);
                             });
                           }
                           if (data.mcps) {
                             data.mcps.forEach((m: any) => {
-                              if (!useStore().mcps.find(s => s.id === m.id)) {
-                                useStore().addMCP(m);
-                              }
+                              const exists = state.mcps.some((s) => s.id === m.id || (m.name && s.name === m.name));
+                              if (!exists) state.addMCP(m);
                             });
                           }
-                          if (data.routerEnabled !== undefined) useStore().setRouterEnabled(data.routerEnabled);
-                          if (data.defaultModelId) useStore().setDefaultModelId(data.defaultModelId);
-                          if (data.theme) useStore().setTheme(data.theme);
+                          if (data.routerEnabled !== undefined) state.setRouterEnabled(data.routerEnabled);
+                          if (data.defaultModelId) state.setDefaultModelId(data.defaultModelId);
+                          if (data.theme) state.setTheme(data.theme);
                           showToast('设置已导入');
                         } catch {
                           showToast('导入失败：文件格式不正确');

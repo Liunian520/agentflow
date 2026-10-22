@@ -325,6 +325,17 @@ const saveAdminToStorage = (admin: StoredAdmin) => {
   }
 };
 
+function toPublicUser(admin: StoredAdmin): User {
+  return {
+    id: admin.id,
+    username: admin.username,
+    password: '',
+    role: admin.role,
+    avatar: admin.avatar,
+    createdAt: admin.createdAt,
+  };
+}
+
 /** 判断是否首次使用 */
 const checkFirstTime = (): boolean => {
   return !loadAdminFromStorage();
@@ -347,8 +358,8 @@ export const useStore = create<AppState>()(
       createdAt: new Date().toISOString(),
     };
     saveAdminToStorage(admin);
-    // 自动登录
-    const user: User = { ...admin, password: '' };
+    // 自动登录。不要把 passwordHash 展开进 currentUser。
+    const user = toPublicUser(admin);
     set({ currentUser: user, isFirstTime: false });
     saveUserToStorage(user);
   },
@@ -361,7 +372,7 @@ export const useStore = create<AppState>()(
     }
     const isMatch = await verifyPassword(password, admin.passwordHash);
     if (isMatch && username === admin.username) {
-      const user: User = { ...admin, password: '' };
+      const user = toPublicUser(admin);
       set({ currentUser: user });
       saveUserToStorage(user);
       return true;
@@ -376,16 +387,19 @@ export const useStore = create<AppState>()(
   // Channels
   channels: [],
   addChannel: (channel) =>
-    set((state) => ({
-      channels: [
-        ...state.channels,
-        {
-          ...channel,
-          id: `ch-${generateId()}`,
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    })),
+    set((state) => {
+      const incoming = channel as typeof channel & { id?: string; createdAt?: string };
+      return {
+        channels: [
+          ...state.channels,
+          {
+            ...channel,
+            id: incoming.id || `ch-${generateId()}`,
+            createdAt: incoming.createdAt || new Date().toISOString(),
+          },
+        ],
+      };
+    }),
   updateChannel: (id, updates) =>
     set((state) => ({
       channels: state.channels.map((c) => (c.id === id ? { ...c, ...updates } : c)),
@@ -2076,18 +2090,21 @@ export const useStore = create<AppState>()(
   // 检查点（命名快照）
   checkpoints: {},
   addMCP: (server) =>
-    set((state) => ({
-      mcps: [
-        ...state.mcps,
-        {
-          ...server,
-          id: generateId(),
-          status: 'disconnected',
-          tools: [],
-          createdAt: new Date().toISOString(),
-        },
-      ],
-    })),
+    set((state) => {
+      const incoming = server as typeof server & { id?: string; createdAt?: string };
+      return {
+        mcps: [
+          ...state.mcps,
+          {
+            ...server,
+            id: incoming.id || generateId(),
+            status: 'disconnected' as const,
+            tools: [],
+            createdAt: incoming.createdAt || new Date().toISOString(),
+          },
+        ],
+      };
+    }),
   updateMCP: (id, updates) =>
     set((state) => ({
       mcps: state.mcps.map((m) => (m.id === id ? { ...m, ...updates } : m)),
@@ -2206,8 +2223,16 @@ export const useStore = create<AppState>()(
       name: 'agentflow-data',
       // 只持久化业务数据，不持久化运行时状态
       partialize: (state) => ({
-        currentUser: state.currentUser,
-        isFirstTime: state.isFirstTime,
+        currentUser: state.currentUser
+          ? {
+              id: state.currentUser.id,
+              username: state.currentUser.username,
+              password: '',
+              role: state.currentUser.role,
+              avatar: state.currentUser.avatar,
+              createdAt: state.currentUser.createdAt,
+            }
+          : null,
         workflows: state.workflows,
         agents: state.agents,
         channels: state.channels,
@@ -2283,7 +2308,6 @@ export const useStore = create<AppState>()(
             const core = {
               state: {
                 currentUser: v.state?.currentUser,
-                isFirstTime: v.state?.isFirstTime,
                 workflows: v.state?.workflows,
                 agents: v.state?.agents,
                 channels: v.state?.channels,
@@ -2309,10 +2333,23 @@ export const useStore = create<AppState>()(
         // persistedState 是空对象（localStorage 无数据）时才使用 mock 初始值；
         // 不能再用 workflows 做判断，否则只配了 channels / agents 的用户数据会被整体丢弃。
         if (!persisted || Object.keys(persisted).length === 0) {
-          return currentState;
+          return { ...currentState, isFirstTime: checkFirstTime() };
         }
-        // 合并：persisted 覆盖 currentState 的业务数据，mock 数据作为默认值保留
-        return { ...currentState, ...persisted };
+        // 合并：persisted 覆盖 currentState 的业务数据，mock 数据作为默认值保留。
+        // isFirstTime 以管理员凭据是否存在为准，避免旧缓存把已创建的管理员重新当成首次设置。
+        const merged = { ...currentState, ...persisted, isFirstTime: checkFirstTime() };
+        if (merged.currentUser) {
+          const raw = merged.currentUser as User & { passwordHash?: string };
+          merged.currentUser = {
+            id: raw.id,
+            username: raw.username,
+            password: '',
+            role: raw.role,
+            avatar: raw.avatar,
+            createdAt: raw.createdAt,
+          };
+        }
+        return merged;
       },
     },
   ),

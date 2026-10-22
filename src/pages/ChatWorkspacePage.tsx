@@ -1530,23 +1530,25 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
     processUserInput(suggestion);
   };
 
+  const createEmptySession = (): ChatSession => ({
+    id: `session-${generateId()}`,
+    title: '新对话',
+    messages: [
+      {
+        id: `msg-${generateId()}`,
+        role: 'assistant',
+        content: '开始新的对话！告诉我你想做什么。\n\n输入 `/help` 查看所有命令。',
+        timestamp: new Date().toISOString(),
+        messageType: 'text',
+      },
+    ],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    mode: activeMode,
+  });
+
   const handleNewSession = () => {
-    const newSession: ChatSession = {
-      id: `session-${generateId()}`,
-      title: '新对话',
-      messages: [
-        {
-          id: `msg-${generateId()}`,
-          role: 'assistant',
-          content: '开始新的对话！告诉我你想做什么。\n\n输入 `/help` 查看所有命令。',
-          timestamp: new Date().toISOString(),
-          messageType: 'text',
-        },
-      ],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      mode: activeMode,
-    };
+    const newSession = createEmptySession();
     setSessions(prev => [newSession, ...prev]);
     setActiveSessionId(newSession.id);
 
@@ -1557,10 +1559,17 @@ ${bestPlan.workflow ? `**${bestPlan.workflow.name}** — ${bestPlan.workflow.nod
   const handleDeleteSession = (sessionId: string) => {
     // Phase 10: 记忆架构 — 清理 Session Memory
     getMemoryManager().onSessionEnd(sessionId);
-    setSessions(prev => prev.filter(s => s.id !== sessionId));
+    const remaining = sessions.filter(s => s.id !== sessionId);
+    if (remaining.length === 0) {
+      const fresh = createEmptySession();
+      setSessions([fresh]);
+      setActiveSessionId(fresh.id);
+      getMemoryManager().onSessionStart(fresh.id);
+      return;
+    }
+    setSessions(remaining);
     if (activeSessionId === sessionId) {
-      const remaining = sessions.filter(s => s.id !== sessionId);
-      setActiveSessionId(remaining[0]?.id || 'session-default');
+      setActiveSessionId(remaining[0].id);
     }
   };
 
